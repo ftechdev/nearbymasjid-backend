@@ -201,17 +201,18 @@ router.put('/:id/timings', protect, async (req, res) => {
       return res.status(404).json({ message: 'Mosque not found' });
     }
 
-    // Basic validation of the 5 times
-    const required = ['fajr', 'dhuhr', 'asr', 'maghrib', 'isha'];
-    const provided = Object.keys(iqamahTimings || {});
-    const isValid = required.every(p => provided.includes(p));
-
-    if (!isValid) {
-      return res.status(400).json({ message: 'Please provide all 5 prayer times' });
+    if (!iqamahTimings || Object.keys(iqamahTimings).length === 0) {
+      return res.status(400).json({ message: 'Please provide at least one prayer time' });
     }
 
-    // Ensure it's stored correctly as an object (Sequelize JSON handles this)
-    mosque.iqamahTimings = typeof iqamahTimings === 'string' ? JSON.parse(iqamahTimings) : iqamahTimings;
+    const raw = typeof iqamahTimings === 'string' ? JSON.parse(iqamahTimings) : iqamahTimings;
+    // Strip empty values so partial updates don't erase existing times
+    const incoming = Object.fromEntries(Object.entries(raw).filter(([, v]) => v && v.trim() !== ''));
+    if (Object.keys(incoming).length === 0) {
+      return res.status(400).json({ message: 'Please provide at least one prayer time' });
+    }
+    const existing = mosque.iqamahTimings || {};
+    mosque.iqamahTimings = { ...existing, ...incoming };
     mosque.timingsApproved = false; // Set to false for manual review
     mosque.timingsSubmittedBy = {
       id: req.user.id,
@@ -221,7 +222,7 @@ router.put('/:id/timings', protect, async (req, res) => {
     };
     await mosque.save();
 
-    res.json({ message: 'Timings updated successfully', iqamahTimings });
+    res.json({ message: 'Timings updated successfully', iqamahTimings: mosque.iqamahTimings });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Server Error' });
