@@ -42,13 +42,27 @@ const connectDB = async () => {
     require('../models/AppReview');
     require('../models/Settings');
 
-    // Add OTP columns if they don't exist yet (safe on re-deploy)
+    // Password-reset link columns (replaced the old OTP-based reset — resetOtp /
+    // resetOtpExpiry below are legacy and no longer read by any route)
     try {
       await sequelize.query("ALTER TABLE Users ADD COLUMN resetOtp VARCHAR(6) NULL");
     } catch (e) { /* column already exists */ }
     try {
       await sequelize.query("ALTER TABLE Users ADD COLUMN resetOtpExpiry DATETIME NULL");
     } catch (e) { /* column already exists */ }
+    try {
+      await sequelize.query("ALTER TABLE Users ADD COLUMN resetToken VARCHAR(128) NULL");
+    } catch (e) { /* column already exists */ }
+    try {
+      await sequelize.query("ALTER TABLE Users ADD COLUMN resetTokenExpiry DATETIME NULL");
+    } catch (e) { /* column already exists */ }
+
+    // Speeds up the nearby-mosques search (GET /api/mosques), which filters by all
+    // three of these columns together. sync() below only creates indexes on brand-new
+    // tables, so add it manually here too for databases that already existed before it.
+    try {
+      await sequelize.query("CREATE INDEX mosques_approved_lat_lng ON Mosques (isApproved, lat, lng)");
+    } catch (e) { /* index already exists */ }
 
     await sequelize.sync(); // Just sync, don't alter
   } catch (error) {

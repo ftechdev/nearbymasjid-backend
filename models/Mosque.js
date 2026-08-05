@@ -45,9 +45,20 @@ const Mosque = sequelize.define('Mosque', {
     type: DataTypes.STRING(500),
     allowNull: true,
   },
+  // Set whenever someone updates an existing mosque's photo after creation; the live
+  // photoUrl above only changes once an admin approves it (see /mosques/:id/photo and
+  // /admin/mosques/:id/approve-photo).
+  pendingPhotoUrl: {
+    type: DataTypes.STRING(500),
+    allowNull: true,
+  },
+  photoSubmittedBy: {
+    type: DataTypes.JSON, // { id, name, email, submittedAt }
+    allowNull: true,
+  },
   school: {
     type: DataTypes.ENUM('hanafi', 'shafi'),
-    defaultValue: 'shafi',
+    defaultValue: 'hanafi',
   },
   timingsSubmittedBy: {
     type: DataTypes.JSON, // { id, name, email, submittedAt }
@@ -55,6 +66,10 @@ const Mosque = sequelize.define('Mosque', {
   },
 }, {
   timestamps: true,
+  indexes: [
+    // Matches the WHERE clause used by the nearby-mosques search (GET /api/mosques)
+    { fields: ['isApproved', 'lat', 'lng'] },
+  ],
 });
 
 // Relationships

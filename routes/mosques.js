@@ -1,24 +1,47 @@
 const express = require('express');
 const router = express.Router();
+const rateLimit = require('express-rate-limit');
 const Mosque = require('../models/Mosque');
 const { protect } = require('../middleware/auth');
+const { Op } = require('sequelize');
 
 const axios = require('axios');
+
+// Applies to submissions/uploads/updates below — these all require login already,
+// but a compromised or malicious account could otherwise spam submissions or the
+// upload endpoint with no limit at all.
+const writeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 30,
+  message: { message: 'Too many requests. Please try again in 15 minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // Get all approved mosques (and nearby places from Google)
 router.get('/', async (req, res) => {
   try {
     const { lat, lng, keyword } = req.query;
 
-    // Validate coordinates if provided
+    const where = { isApproved: true };
+
+    // Validate coordinates if provided, and pre-filter to a bounding box around them
+    // so a search doesn't pull every approved mosque in the whole database — the box
+    // is a coarse superset of the real radius; exact distance sort still happens
+    // afterward (in this route's Google merge and again on the client).
     if (lat || lng) {
       const latNum = parseFloat(lat), lngNum = parseFloat(lng);
       if (isNaN(latNum) || isNaN(lngNum) || latNum < -90 || latNum > 90 || lngNum < -180 || lngNum > 180) {
         return res.status(400).json({ message: 'Invalid latitude or longitude' });
       }
+      const RADIUS_KM = 20;
+      const latDelta = RADIUS_KM / 111;
+      const lngDelta = RADIUS_KM / (111 * Math.cos(latNum * Math.PI / 180));
+      where.lat = { [Op.between]: [latNum - latDelta, latNum + latDelta] };
+      where.lng = { [Op.between]: [lngNum - lngDelta, lngNum + lngDelta] };
     }
 
-    let mosques = await Mosque.findAll({ where: { isApproved: true } });
+    let mosques = await Mosque.findAll({ where, limit: 200 });
     // Convert to plain JSON if coming from Sequelize
     mosques = mosques.map(m => m.toJSON ? m.toJSON() : m);
 
@@ -78,7 +101,7 @@ router.get('/', async (req, res) => {
 });
 
 // Submit a new mosque
-router.post('/', protect, async (req, res) => {
+router.post('/', protect, writeLimiter, async (req, res) => {
   try {
     const { name, address, location, school, iqamahTimings, photoUrl } = req.body;
     if (!name || !address || !location?.lat) {
@@ -150,7 +173,7 @@ const uploadMem = multer({
 });
 const { smartUpload } = require('../utils/uploadHandler');
 
-router.post('/upload-photo', protect, (req, res, next) => {
+router.post('/upload-photo', protect, writeLimiter, (req, res, next) => {
   uploadMem.single('photo')(req, res, (err) => {
     if (err) {
       if (err.code === 'LIMIT_FILE_SIZE') {
@@ -173,7 +196,7 @@ router.post('/upload-photo', protect, (req, res, next) => {
 });
 
 // Update mosque timings
-router.put('/:id/timings', protect, async (req, res) => {
+router.put('/:id/timings', protect, writeLimiter, async (req, res) => {
   try {
     const { iqamahTimings, mosqueData } = req.body;
     let mosque = null;
@@ -213,7 +236,7 @@ router.put('/:id/timings', protect, async (req, res) => {
     }
     const existing = mosque.iqamahTimings || {};
     mosque.iqamahTimings = { ...existing, ...incoming };
-    mosque.timingsApproved = false; // Set to false for manual review
+    mosque.timingsApproved = true; // Crowdsourced timings go live immediately, no admin review needed
     mosque.timingsSubmittedBy = {
       id: req.user.id,
       name: req.user.name,
@@ -229,15 +252,94 @@ router.put('/:id/timings', protect, async (req, res) => {
   }
 });
 
+// Submit an updated mosque photo (any logged-in user, same crowdsourced model as
+// timings). Unlike timings, a photo replacement stays pending until an admin approves
+// it — the live photoUrl is untouched until then, so a bad/wrong photo can't go public.
+router.put('/:id/photo', protect, writeLimiter, async (req, res) => {
+  try {
+    const { photoUrl, mosqueData } = req.body;
+    if (!photoUrl) {
+      return res.status(400).json({ message: 'photoUrl is required' });
+    }
+
+    let mosque = null;
+    try {
+      mosque = await Mosque.findByPk(req.params.id);
+    } catch {}
+
+    if (!mosque) {
+      mosque = await Mosque.findOne({ where: { googlePlaceId: req.params.id } });
+    }
+
+    // If NOT found and mosqueData is provided (Google-sourced mosque not yet in our DB), create it.
+    // This is the very first photo for a brand-new record, so it can go live immediately.
+    if (!mosque && mosqueData) {
+      mosque = await Mosque.create({
+        ...mosqueData,
+        photoUrl,
+        userId: req.user.id,
+        isApproved: true
+      });
+      return res.json({ message: 'Photo added successfully', photoUrl: mosque.photoUrl, pending: false });
+    }
+
+    if (!mosque) {
+      return res.status(404).json({ message: 'Mosque not found' });
+    }
+
+    mosque.pendingPhotoUrl = photoUrl;
+    mosque.photoSubmittedBy = {
+      id: req.user.id,
+      name: req.user.name,
+      email: req.user.email,
+      submittedAt: new Date().toISOString(),
+    };
+    await mosque.save();
+
+    res.json({ message: 'Photo submitted for admin review', pendingPhotoUrl: mosque.pendingPhotoUrl, pending: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Server Error' });
+  }
+});
+
 // Get mosques added by the current user
 router.get('/my-mosques', protect, async (req, res) => {
   try {
-    const mosques = await Mosque.findAll({ 
+    const mosques = await Mosque.findAll({
       where: { userId: req.user.id },
       order: [['createdAt', 'DESC']]
     });
     res.json(mosques);
   } catch (err) {
+    res.status(500).json({ message: 'Server Error' });
+  }
+});
+
+// Get the latest data for a single mosque, by internal ID or Google Place ID.
+// Registered last (after every other specific GET route) so it doesn't shadow them —
+// Express matches ':id' against any single path segment. Used to refresh a user's
+// selected "my masjid" with current timings/photo instead of a stale cached snapshot.
+router.get('/:id', async (req, res) => {
+  try {
+    let mosque = null;
+    try {
+      mosque = await Mosque.findByPk(req.params.id);
+    } catch {}
+    if (!mosque) {
+      mosque = await Mosque.findOne({ where: { googlePlaceId: req.params.id } });
+    }
+    if (!mosque) {
+      return res.status(404).json({ message: 'Mosque not found' });
+    }
+
+    const data = mosque.toJSON();
+    if (typeof data.iqamahTimings === 'string') {
+      try { data.iqamahTimings = JSON.parse(data.iqamahTimings); } catch {}
+    }
+    res.json(data);
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ message: 'Server Error' });
   }
 });

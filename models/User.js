@@ -28,11 +28,11 @@ const User = sequelize.define('User', {
     type: DataTypes.ENUM('user', 'admin'),
     defaultValue: 'user',
   },
-  resetOtp: {
-    type: DataTypes.STRING(6),
+  resetToken: {
+    type: DataTypes.STRING(128),
     allowNull: true,
   },
-  resetOtpExpiry: {
+  resetTokenExpiry: {
     type: DataTypes.DATE,
     allowNull: true,
   },

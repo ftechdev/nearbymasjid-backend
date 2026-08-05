@@ -44,14 +44,9 @@ router.get('/analytics', protect, admin, async (req, res) => {
   try {
     const totalMosques = await Mosque.count();
     const pendingMosques = await Mosque.count({ where: { isApproved: false } });
-    const pendingTimings = await Mosque.count({ 
-      where: { 
-        timingsApproved: false,
-        iqamahTimings: { [Op.ne]: null }
-      } 
-    });
+    const pendingPhotos = await Mosque.count({ where: { pendingPhotoUrl: { [Op.ne]: null } } });
     const totalUsers = await User.count();
-    res.json({ totalMosques, pendingMosques, pendingTimings, totalUsers });
+    res.json({ totalMosques, pendingMosques, pendingPhotos, totalUsers });
   } catch (err) {
     console.error('Admin Analytics Error:', err);
     res.status(500).json({ message: 'Error fetching analytics' });
@@ -68,6 +63,28 @@ router.put('/mosques/:id/approve-timing', protect, admin, async (req, res) => {
   } else {
     res.status(404).json({ message: 'Mosque not found' });
   }
+});
+
+// Approve a pending photo update — makes it the live photo
+router.put('/mosques/:id/approve-photo', protect, admin, async (req, res) => {
+  const mosque = await Mosque.findByPk(req.params.id);
+  if (!mosque) return res.status(404).json({ message: 'Mosque not found' });
+  if (!mosque.pendingPhotoUrl) return res.status(400).json({ message: 'No pending photo to approve' });
+
+  mosque.photoUrl = mosque.pendingPhotoUrl;
+  mosque.pendingPhotoUrl = null;
+  await mosque.save();
+  res.json({ message: 'Photo approved', mosque });
+});
+
+// Reject a pending photo update — keeps the current live photo unchanged
+router.put('/mosques/:id/reject-photo', protect, admin, async (req, res) => {
+  const mosque = await Mosque.findByPk(req.params.id);
+  if (!mosque) return res.status(404).json({ message: 'Mosque not found' });
+
+  mosque.pendingPhotoUrl = null;
+  await mosque.save();
+  res.json({ message: 'Photo rejected', mosque });
 });
 
 // 4. GENERIC ROUTES LAST

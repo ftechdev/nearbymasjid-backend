@@ -1,12 +1,23 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
 const { connectDB } = require('./config/db');
 
 const app = express();
 
 // Trust Render/proxy X-Forwarded-For so express-rate-limit works correctly
 app.set('trust proxy', 1);
+
+app.use(helmet({
+  // This API serves a plain HTML page (/reset-password) with inline <script>/<style> —
+  // helmet's default CSP would block that, and there's no separate web frontend here
+  // to justify a strict policy.
+  contentSecurityPolicy: false,
+  // Mosque photos under /uploads are public and meant to be embeddable from any
+  // origin (the app, a future website, etc.) — same-origin would needlessly block that.
+  crossOriginResourcePolicy: false,
+}));
 
 connectDB();
 
@@ -54,60 +65,73 @@ app.get('/reset-password', (req, res) => {
   <title>Reset Password — Masjid Finder</title>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f4f1;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
-    .card{background:#fff;border-radius:24px;padding:40px 32px;max-width:420px;width:100%;box-shadow:0 8px 40px rgba(0,0,0,.10)}
-    .icon-wrap{width:72px;height:72px;border-radius:50%;background:#ecfdf5;display:flex;align-items:center;justify-content:center;margin:0 auto 24px}
-    .icon-wrap svg{width:36px;height:36px}
-    h1{font-size:26px;font-weight:800;color:#1a2e25;text-align:center;margin-bottom:8px;letter-spacing:-0.3px}
-    p{color:#5a7a6a;text-align:center;font-size:15px;line-height:1.6;margin-bottom:28px}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:linear-gradient(160deg,#e8f3ee 0%,#f5f8f6 45%,#fdf9ef 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+    .card{background:#fff;border-radius:26px;max-width:420px;width:100%;box-shadow:0 20px 60px rgba(15,76,58,.16);overflow:hidden}
+    .card-header{background:linear-gradient(135deg,#0f4c3a 0%,#1a7a5c 100%);padding:32px 32px 28px;text-align:center}
+    .icon-wrap{width:64px;height:64px;border-radius:18px;background:rgba(255,255,255,.18);display:flex;align-items:center;justify-content:center;margin:0 auto 14px}
+    .icon-wrap svg{width:32px;height:32px}
+    .brand-name{color:#fff;font-size:18px;font-weight:800;letter-spacing:.2px}
+    .brand-tag{color:rgba(255,255,255,.75);font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;margin-top:3px}
+    .card-body{padding:32px}
+    h1{font-size:23px;font-weight:800;color:#1a2e25;text-align:center;margin-bottom:8px;letter-spacing:-0.3px}
+    p{color:#5a7a6a;text-align:center;font-size:14px;line-height:1.6;margin-bottom:24px}
     label{display:block;font-size:13px;font-weight:600;color:#1a2e25;margin-bottom:6px}
     .field{position:relative;margin-bottom:16px}
     input[type=password],input[type=text]{width:100%;height:52px;border:1.5px solid #dce9e3;border-radius:14px;padding:0 48px 0 16px;font-size:15px;color:#1a2e25;font-weight:500;background:#f8fafc;outline:none;transition:border-color .2s}
     input:focus{border-color:#0f4c3a;background:#fff}
-    .toggle{position:absolute;right:14px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;padding:4px;color:#9ab5a8}
+    .toggle{position:absolute;right:14px;top:38px;background:none;border:none;cursor:pointer;padding:4px;color:#9ab5a8}
     .toggle:hover{color:#0f4c3a}
-    button[type=submit]{width:100%;height:54px;border-radius:16px;background:#0f4c3a;color:#fff;font-size:16px;font-weight:700;border:none;cursor:pointer;margin-top:8px;transition:opacity .2s;letter-spacing:.2px}
+    button[type=submit]{width:100%;height:54px;border-radius:16px;background:linear-gradient(135deg,#0f4c3a 0%,#1a7a5c 100%);color:#fff;font-size:16px;font-weight:700;border:none;cursor:pointer;margin-top:8px;transition:opacity .2s,transform .2s;letter-spacing:.2px;box-shadow:0 8px 20px rgba(15,76,58,.3)}
+    button[type=submit]:active{transform:scale(.98)}
     button[type=submit]:disabled{opacity:.6;cursor:not-allowed}
     .alert{display:none;padding:14px 16px;border-radius:14px;font-size:14px;font-weight:600;margin-bottom:20px;align-items:center;gap:10px}
     .alert.error{background:#fef2f2;border:1px solid #fecaca;color:#dc2626}
     .alert.success{background:#f0fdf4;border:1px solid #bbf7d0;color:#16a34a}
     .alert.show{display:flex}
     .hint{font-size:12px;color:#9ab5a8;margin-top:4px}
-    .brand{text-align:center;margin-top:28px;font-size:13px;color:#9ab5a8}
-    .brand span{color:#0f4c3a;font-weight:700}
+    .secure-badge{display:flex;align-items:center;justify-content:center;gap:6px;margin-top:22px;color:#c9a84c;font-size:11px;font-weight:800;letter-spacing:.5px;text-transform:uppercase}
   </style>
 </head>
 <body>
   <div class="card">
-    <div class="icon-wrap">
-      <svg viewBox="0 0 24 24" fill="none" stroke="#0f4c3a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-      </svg>
+    <div class="card-header">
+      <div class="icon-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        </svg>
+      </div>
+      <div class="brand-name">Masjid Finder</div>
+      <div class="brand-tag">Password Reset</div>
     </div>
-    <h1>Choose New Password</h1>
-    <p>Create a strong password to keep your Masjid Finder account secure.</p>
+    <div class="card-body">
+      <h1>Choose New Password</h1>
+      <p>Create a strong password to keep your Masjid Finder account secure.</p>
 
-    <div id="alert" class="alert" role="alert"></div>
+      <div id="alert" class="alert" role="alert"></div>
 
-    <form id="form">
-      <div class="field">
-        <label for="pw">New Password</label>
-        <input type="password" id="pw" placeholder="At least 6 characters" autocomplete="new-password" />
-        <button type="button" class="toggle" onclick="toggle('pw',this)" aria-label="Show password">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-        </button>
-        <div class="hint" id="pw-hint"></div>
+      <form id="form">
+        <div class="field">
+          <label for="pw">New Password</label>
+          <input type="password" id="pw" placeholder="At least 6 characters" autocomplete="new-password" />
+          <button type="button" class="toggle" onclick="toggle('pw',this)" aria-label="Show password">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+          <div class="hint" id="pw-hint"></div>
+        </div>
+        <div class="field">
+          <label for="pw2">Confirm Password</label>
+          <input type="password" id="pw2" placeholder="Repeat your password" autocomplete="new-password" />
+          <button type="button" class="toggle" onclick="toggle('pw2',this)" aria-label="Show password">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+        <button type="submit" id="submit-btn">Reset Password</button>
+      </form>
+      <div class="secure-badge">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#c9a84c" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        Secure Reset
       </div>
-      <div class="field">
-        <label for="pw2">Confirm Password</label>
-        <input type="password" id="pw2" placeholder="Repeat your password" autocomplete="new-password" />
-        <button type="button" class="toggle" onclick="toggle('pw2',this)" aria-label="Show password">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-        </button>
-      </div>
-      <button type="submit" id="submit-btn">Reset Password</button>
-    </form>
-    <p class="brand">Masjid Finder &nbsp;·&nbsp; <span>🕌</span></p>
+    </div>
   </div>
 
   <script>

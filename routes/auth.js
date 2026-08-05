@@ -1,11 +1,12 @@
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const User = require('../models/User');
 const { OAuth2Client } = require('google-auth-library');
 const { protect } = require('../middleware/auth');
-const { sendOtpEmail, sendPasswordResetEmail } = require('../utils/mailer');
+const { sendPasswordResetEmail } = require('../utils/mailer');
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
@@ -153,7 +154,8 @@ router.get('/me', protect, async (req, res) => {
   }
 });
 
-// POST /api/auth/forgot-password — sends 6-digit OTP to email
+// POST /api/auth/forgot-password — emails a one-tap reset link (opens the
+// /reset-password web page, which posts straight to /reset-password below)
 router.post('/forgot-password', authLimiter, async (req, res) => {
   try {
     const { email } = req.body;
@@ -162,79 +164,51 @@ router.post('/forgot-password', authLimiter, async (req, res) => {
     const user = await User.findOne({ where: { email } });
 
     if (user) {
-      const otp = Math.floor(100000 + Math.random() * 900000).toString();
-      user.resetOtp = otp;
-      user.resetOtpExpiry = new Date(Date.now() + 15 * 60 * 1000);
+      const token = crypto.randomBytes(32).toString('hex');
+      user.resetToken = token;
+      user.resetTokenExpiry = new Date(Date.now() + 30 * 60 * 1000);
       await user.save();
+
+      const baseUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT || 5000}`;
+      const resetLink = `${baseUrl}/reset-password?token=${token}`;
       // Fire-and-forget — don't block the response on SMTP
-      sendOtpEmail(user.email, user.name, otp).catch(e => console.error('OTP email failed:', e.message));
+      sendPasswordResetEmail(user.email, user.name, resetLink).catch(e => console.error('Reset email failed:', e.message));
     }
 
-    res.json({ message: 'If an account with that email exists, an OTP has been sent.' });
+    res.json({ message: 'If an account with that email exists, a reset link has been sent.' });
   } catch (error) {
     console.error('Forgot Password Error:', error);
     res.status(500).json({ message: 'Server error. Please try again.' });
   }
 });
 
-// POST /api/auth/verify-otp — verifies OTP, returns short-lived reset token
-router.post('/verify-otp', authLimiter, async (req, res) => {
-  try {
-    const { email, otp } = req.body;
-    if (!email || !otp) return res.status(400).json({ message: 'Email and OTP are required' });
-
-    const user = await User.findOne({ where: { email } });
-
-    if (
-      !user ||
-      !user.resetOtp ||
-      user.resetOtp !== otp.trim() ||
-      !user.resetOtpExpiry ||
-      new Date() > new Date(user.resetOtpExpiry)
-    ) {
-      return res.status(400).json({ message: 'Invalid or expired OTP. Please try again.' });
-    }
-
-    // Clear OTP immediately after use
-    user.resetOtp = null;
-    user.resetOtpExpiry = null;
-    await user.save();
-
-    const resetToken = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '15m' });
-    res.json({ message: 'OTP verified', resetToken });
-  } catch (error) {
-    console.error('Verify OTP Error:', error);
-    res.status(500).json({ message: 'Server error. Please try again.' });
-  }
-});
-
-// POST /api/auth/reset-password
+// POST /api/auth/reset-password — called by the web page the reset link opens
 router.post('/reset-password', async (req, res) => {
   try {
     const { token, newPassword } = req.body;
     if (!token || !newPassword) {
       return res.status(400).json({ message: 'Missing token or new password' });
     }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ message: 'Password must be at least 6 characters' });
+    }
 
-    // Verify token
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findByPk(decoded.id);
+    const user = await User.findOne({ where: { resetToken: token } });
 
-    if (!user) {
-      return res.status(404).json({ message: 'Invalid or expired token' });
+    if (!user || !user.resetTokenExpiry || new Date() > new Date(user.resetTokenExpiry)) {
+      return res.status(400).json({ message: 'Invalid or expired reset link. Please request a new one.' });
     }
 
     // Update password (model hook will hash it)
     user.password = newPassword;
+    user.resetToken = null;
+    user.resetTokenExpiry = null;
     await user.save();
 
     res.json({ message: 'Password has been reset successfully' });
   } catch (error) {
-    if (error.name === 'TokenExpiredError') {
-      return res.status(400).json({ message: 'Token has expired. Please request a new link.' });
-    }
     console.error('Reset Password Error:', error);
-    res.status(500).json({ message: 'Invalid or expired token. Please try again.' });
+    res.status(500).json({ message: 'Server error. Please try again.' });
   }
 });
 
