@@ -42,8 +42,14 @@ router.get('/', async (req, res) => {
     }
 
     let mosques = await Mosque.findAll({ where, limit: 200 });
-    // Convert to plain JSON if coming from Sequelize
-    mosques = mosques.map(m => m.toJSON ? m.toJSON() : m);
+    // Convert to plain JSON if coming from Sequelize & parse iqamahTimings if stringified
+    mosques = mosques.map(m => {
+      let data = m.toJSON ? m.toJSON() : m;
+      if (typeof data.iqamahTimings === 'string') {
+        try { data.iqamahTimings = JSON.parse(data.iqamahTimings); } catch (e) {}
+      }
+      return data;
+    });
 
     // Filter DB mosques by keyword (name or address match)
     if (keyword) {
