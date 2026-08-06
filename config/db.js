@@ -57,6 +57,17 @@ const connectDB = async () => {
       await sequelize.query("ALTER TABLE Users ADD COLUMN resetTokenExpiry DATETIME NULL");
     } catch (e) { /* column already exists */ }
 
+    // Ensure new Mosque columns exist on database startup
+    try {
+      await sequelize.query("ALTER TABLE Mosques ADD COLUMN pendingPhotoUrl VARCHAR(500) NULL");
+    } catch (e) { /* column already exists */ }
+    try {
+      await sequelize.query("ALTER TABLE Mosques ADD COLUMN photoSubmittedBy JSON NULL");
+    } catch (e) { /* column already exists */ }
+    try {
+      await sequelize.query("ALTER TABLE Mosques ADD COLUMN timingsSubmittedBy JSON NULL");
+    } catch (e) { /* column already exists */ }
+
     // Speeds up the nearby-mosques search (GET /api/mosques), which filters by all
     // three of these columns together. sync() below only creates indexes on brand-new
     // tables, so add it manually here too for databases that already existed before it.
