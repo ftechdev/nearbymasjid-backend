@@ -62,7 +62,7 @@ app.get('/reset-password', (req, res) => {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Reset Password — Masjid Finder</title>
+  <title>Reset Password — NearbyMosque</title>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
     body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:linear-gradient(160deg,#e8f3ee 0%,#f5f8f6 45%,#fdf9ef 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
@@ -100,12 +100,12 @@ app.get('/reset-password', (req, res) => {
           <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
         </svg>
       </div>
-      <div class="brand-name">Masjid Finder</div>
+      <div class="brand-name">NearbyMosque</div>
       <div class="brand-tag">Password Reset</div>
     </div>
     <div class="card-body">
       <h1>Choose New Password</h1>
-      <p>Create a strong password to keep your Masjid Finder account secure.</p>
+      <p>Create a strong password to keep your NearbyMosque account secure.</p>
 
       <div id="alert" class="alert" role="alert"></div>
 

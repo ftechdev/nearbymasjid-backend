@@ -35,7 +35,7 @@ const emailShell = ({ headerTitle, accentColor = '#0f4c3a', bodyHtml }) => `
                     <td align="center" style="width:64px;height:64px;background:rgba(255,255,255,0.18);border-radius:18px;font-size:30px;line-height:64px;">🕌</td>
                   </tr>
                 </table>
-                <div style="color:#ffffff;font-size:20px;font-weight:800;letter-spacing:0.2px;margin-top:16px;">Masjid Finder</div>
+                <div style="color:#ffffff;font-size:20px;font-weight:800;letter-spacing:0.2px;margin-top:16px;">NearbyMosque</div>
                 <div style="color:rgba(255,255,255,0.75);font-size:12px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;margin-top:4px;">${headerTitle}</div>
               </td>
             </tr>
@@ -51,8 +51,8 @@ const emailShell = ({ headerTitle, accentColor = '#0f4c3a', bodyHtml }) => `
             <tr>
               <td style="padding:28px 32px 32px;">
                 <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td style="border-top:1px solid #eef2ef;padding-top:20px;" align="center">
-                  <div style="color:#9ab5a8;font-size:12px;font-weight:600;">Masjid Finder &nbsp;·&nbsp; Find your nearest masjid, on time, every time</div>
-                  <div style="color:#c3d3cb;font-size:11px;margin-top:6px;">© ${new Date().getFullYear()} Masjid Finder. All rights reserved.</div>
+                  <div style="color:#9ab5a8;font-size:12px;font-weight:600;">NearbyMosque &nbsp;·&nbsp; Find your nearest masjid, on time, every time</div>
+                  <div style="color:#c3d3cb;font-size:11px;margin-top:6px;">© ${new Date().getFullYear()} NearbyMosque. All rights reserved.</div>
                 </td></tr></table>
               </td>
             </tr>
@@ -107,9 +107,9 @@ const sendPasswordResetEmail = async (toEmail, userName, resetLink) => {
     `;
 
     await transporter.sendMail({
-      from: `"Masjid Finder" <${process.env.SMTP_USER}>`,
+      from: `"NearbyMosque" <${process.env.SMTP_USER}>`,
       to: toEmail,
-      subject: 'Reset Your Password — Masjid Finder',
+      subject: 'Reset Your Password — NearbyMosque',
       html: emailShell({ headerTitle: 'Password Reset', accentColor: '#0f4c3a', bodyHtml: body }),
     });
   } catch (error) {
