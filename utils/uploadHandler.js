@@ -3,7 +3,10 @@ const { Readable } = require('stream');
 const path = require('path');
 const fs = require('fs');
 
-const FTP_URL_PATH = '/uploads';
+// FTP user is chrooted to public_html/uploads/ (the Node.js app root).
+// To land files in public_html/uploads/uploads/ (where express.static serves from),
+// we upload to /uploads/{filename} on FTP — NOT to root /.
+const FTP_REMOTE_DIR = '/uploads';
 
 const uploadToHostinger = async (file) => {
   const client = new ftp.Client(15000);
@@ -19,16 +22,21 @@ const uploadToHostinger = async (file) => {
 
     const fileName = `masjid_${Date.now()}${path.extname(file.originalname || '.jpg')}`;
 
+    // Ensure the /uploads directory exists on FTP server
+    try { await client.ensureDir(FTP_REMOTE_DIR); } catch(e) {}
+    await client.cd('/'); // reset back to root
+
     const source = new Readable();
     source._read = () => {};
     source.push(file.buffer);
     source.push(null);
 
-    // FTP user is chrooted to the uploads directory, so upload to FTP root "/"
-    await client.uploadFrom(source, `/${fileName}`);
+    // Upload to /uploads/ so file lands in public_html/uploads/uploads/ on Hostinger
+    await client.uploadFrom(source, `${FTP_REMOTE_DIR}/${fileName}`);
 
-    const publicHost = (process.env.FTP_HOST || '').replace(/^ftp\./i, '');
-    return `https://${publicHost}${FTP_URL_PATH}/${fileName}`;
+    // Return URL via api.nearbymosque.in — served by express.static from uploads/ dir
+    const apiHost = process.env.API_PUBLIC_URL || `https://${(process.env.FTP_HOST || '').replace(/^ftp\./i, 'api.')}`;
+    return `${apiHost}/uploads/${fileName}`;
   } catch (err) {
     console.error("Hostinger FTP Upload Failed:", err.message);
     throw err;
