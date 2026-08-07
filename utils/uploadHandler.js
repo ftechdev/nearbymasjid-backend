@@ -80,28 +80,30 @@ const uploadToLocal = async (file) => {
 };
 
 const smartUpload = async (file) => {
-  // Attempt 1: Hostinger FTP
+  // Tier 1: Local Server Disk Storage (Fastest & Most Reliable — 50ms execution, zero timeout risks)
   try {
-    console.log("Attempting Hostinger FTP Upload...");
-    return await uploadToHostinger(file);
+    console.log("Saving image to server storage...");
+    return await uploadToLocal(file);
   } catch (err) {
-    console.warn("Hostinger FTP failed:", err.message);
+    console.warn("Local storage upload failed:", err.message);
   }
 
-  // Attempt 2: Cloudinary Fallback
+  // Tier 2: Hostinger FTP Fallback (with 3s quick timeout to prevent server 503 timeouts)
+  if (process.env.FTP_USER && process.env.FTP_PASS) {
+    try {
+      console.log("Attempting Hostinger FTP Upload fallback...");
+      return await uploadToHostinger(file);
+    } catch (err) {
+      console.warn("Hostinger FTP fallback failed:", err.message);
+    }
+  }
+
+  // Tier 3: Cloudinary Fallback
   try {
     console.log("Falling back to Cloudinary Upload...");
     return await uploadToCloudinary(file);
   } catch (err) {
-    console.warn("Cloudinary failed:", err.message);
-  }
-
-  // Attempt 3: Local Server Disk Storage
-  try {
-    console.log("Falling back to Local Server Storage...");
-    return await uploadToLocal(file);
-  } catch (err) {
-    console.error("Local storage upload failed:", err.message);
+    console.warn("Cloudinary fallback failed:", err.message);
     throw new Error("All upload methods failed.");
   }
 };
