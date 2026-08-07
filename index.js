@@ -83,9 +83,13 @@ app.use('/api/quotes', require('./routes/quotes'));
 app.use('/api/reviews', require('./routes/reviews'));
 app.use('/api/settings', require('./routes/settings'));
 
-// Push notification token registration endpoint
+// Push notification token registration & dissociation endpoints
 app.post('/api/notifications/register-token', (req, res) => {
   res.json({ status: 'ok', message: 'Notification push token registered successfully' });
+});
+
+app.post('/api/notifications/dissociate-token', (req, res) => {
+  res.json({ status: 'ok', message: 'Notification push token dissociated successfully' });
 });
 
 // ── TEMPORARY one-time file seed endpoint ──────────────────────────────────
