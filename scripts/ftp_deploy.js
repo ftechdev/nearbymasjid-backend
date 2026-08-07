@@ -14,6 +14,7 @@ const APP_ROOT = path.join(__dirname, '..');
 const FILES_TO_DEPLOY = [
   'index.js',
   'utils/uploadHandler.js',
+  'routes/mosques.js',
 ];
 
 (async () => {
