@@ -63,7 +63,7 @@ router.get('/', async (req, res) => {
     if (lat && lng && process.env.GOOGLE_MAPS_API_KEY) {
       try {
         const searchKeyword = keyword ? `${keyword} masjid` : 'masjid';
-        const googleRes = await axios.get(`https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=5000&type=mosque&keyword=${encodeURIComponent(searchKeyword)}&key=${process.env.GOOGLE_MAPS_API_KEY}`);
+        const googleRes = await axios.get(`https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=20000&type=mosque&keyword=${encodeURIComponent(searchKeyword)}&key=${process.env.GOOGLE_MAPS_API_KEY}`);
         
         if (googleRes.data && googleRes.data.status !== 'OK' && googleRes.data.status !== 'ZERO_RESULTS') {
           console.error('Google Places API Status:', googleRes.data.status, googleRes.data.error_message || '');
