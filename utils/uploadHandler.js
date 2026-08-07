@@ -80,32 +80,37 @@ const uploadToLocal = async (file) => {
 };
 
 const smartUpload = async (file) => {
-  // Tier 1: Local Server Disk Storage (Fastest & Most Reliable — 50ms execution, zero timeout risks)
-  try {
-    console.log("Saving image to server storage...");
-    return await uploadToLocal(file);
-  } catch (err) {
-    console.warn("Local storage upload failed:", err.message);
-  }
-
-  // Tier 2: Hostinger FTP Fallback (with 3s quick timeout to prevent server 503 timeouts)
-  if (process.env.FTP_USER && process.env.FTP_PASS) {
+  // Tier 1: Cloudinary CDN (global URL — accessible from any device/server, no path issues)
+  if (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET) {
     try {
-      console.log("Attempting Hostinger FTP Upload fallback...");
-      return await uploadToHostinger(file);
+      console.log("📸 Uploading to Cloudinary CDN...");
+      const url = await uploadToCloudinary(file);
+      console.log("✅ Cloudinary upload success:", url);
+      return url;
     } catch (err) {
-      console.warn("Hostinger FTP fallback failed:", err.message);
+      console.warn("⚠️  Cloudinary upload failed:", err.message);
     }
   }
 
-  // Tier 3: Cloudinary Fallback
+  // Tier 2: Local server disk (fallback — only works if app & client share same server)
   try {
-    console.log("Falling back to Cloudinary Upload...");
-    return await uploadToCloudinary(file);
+    console.log("💾 Falling back to local server storage...");
+    return await uploadToLocal(file);
   } catch (err) {
-    console.warn("Cloudinary fallback failed:", err.message);
-    throw new Error("All upload methods failed.");
+    console.warn("⚠️  Local storage upload failed:", err.message);
   }
+
+  // Tier 3: Hostinger FTP Fallback
+  if (process.env.FTP_USER && process.env.FTP_PASS) {
+    try {
+      console.log("📡 Attempting Hostinger FTP Upload fallback...");
+      return await uploadToHostinger(file);
+    } catch (err) {
+      console.warn("⚠️  Hostinger FTP fallback failed:", err.message);
+    }
+  }
+
+  throw new Error("All upload methods failed.");
 };
 
 module.exports = { smartUpload };

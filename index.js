@@ -4,6 +4,8 @@ const cors = require('cors');
 const helmet = require('helmet');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
+const path = require('path');
+const fs = require('fs');
 const { connectDB } = require('./config/db');
 
 // Without a handler, Node already exits on these — but silently, with no log
@@ -54,7 +56,11 @@ app.use(cors({
 }));
 
 app.use(express.json());
-app.use('/uploads', express.static('uploads'));
+
+// Ensure uploads directory exists before serving it
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+app.use('/uploads', express.static(uploadsDir));
 
 // Baseline protection for every /api route — auth.js and mosques.js already
 // layer tighter limiters (authLimiter, writeLimiter) on their sensitive
@@ -81,6 +87,27 @@ app.use('/api/settings', require('./routes/settings'));
 app.post('/api/notifications/register-token', (req, res) => {
   res.json({ status: 'ok', message: 'Notification push token registered successfully' });
 });
+
+// ── TEMPORARY one-time file seed endpoint ──────────────────────────────────
+// Lets us upload existing local image files to the hosted server's /uploads/
+// folder without needing FTP. Secured by ADMIN_SEED_SECRET env var.
+// REMOVE this endpoint once seeding is complete.
+const multerSeed = require('multer');
+const seedUpload = multerSeed({ storage: multerSeed.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+app.post('/api/admin/seed-file', seedUpload.single('file'), async (req, res) => {
+  const secret = req.headers['x-seed-secret'];
+  if (!process.env.ADMIN_SEED_SECRET || secret !== process.env.ADMIN_SEED_SECRET) {
+    return res.status(403).json({ message: 'Forbidden' });
+  }
+  if (!req.file || !req.query.filename) {
+    return res.status(400).json({ message: 'file and filename query param required' });
+  }
+  const filename = path.basename(req.query.filename); // prevent path traversal
+  const dest = path.join(uploadsDir, filename);
+  await fs.promises.writeFile(dest, req.file.buffer);
+  res.json({ message: 'File saved', url: `/uploads/${filename}` });
+});
+
 
 // Basic health check
 app.get('/', (req, res) => {
