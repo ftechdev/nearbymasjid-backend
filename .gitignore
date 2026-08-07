@@ -1,6 +1,5 @@
 .env
 node_modules
-.env.example
 devlopment.env
 uploads/*
 !uploads/.gitkeep
