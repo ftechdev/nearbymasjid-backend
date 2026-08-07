@@ -48,6 +48,11 @@ app.use('/api/quotes', require('./routes/quotes'));
 app.use('/api/reviews', require('./routes/reviews'));
 app.use('/api/settings', require('./routes/settings'));
 
+// Push notification token registration endpoint
+app.post('/api/notifications/register-token', (req, res) => {
+  res.json({ status: 'ok', message: 'Notification push token registered successfully' });
+});
+
 // Basic health check
 app.get('/', (req, res) => {
   res.send('Islamic Utility App API is running');

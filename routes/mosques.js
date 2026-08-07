@@ -182,22 +182,28 @@ const { smartUpload } = require('../utils/uploadHandler');
 router.post('/upload-photo', protect, writeLimiter, (req, res, next) => {
   uploadMem.single('photo')(req, res, (err) => {
     if (err) {
+      console.error('[upload-photo] Multer error:', err.code, err.message);
       if (err.code === 'LIMIT_FILE_SIZE') {
         return res.status(400).json({ message: 'File too large. Maximum size is 5 MB.' });
       }
       return res.status(400).json({ message: err.message || 'Upload error' });
     }
+    console.log('[upload-photo] Multer OK. File:', req.file ? `${req.file.originalname} (${req.file.mimetype}, ${req.file.size} bytes)` : 'NONE');
     next();
   });
 }, async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
+    if (!req.file) {
+      console.error('[upload-photo] No file in request. Content-Type:', req.headers['content-type']);
+      return res.status(400).json({ message: 'No file uploaded' });
+    }
 
     const photoUrl = await smartUpload(req.file);
+    console.log('[upload-photo] Success. URL:', photoUrl);
     res.json({ photoUrl });
   } catch (err) {
-    console.error("Smart Upload Error:", err);
-    res.status(500).json({ message: 'Upload failed on all platforms' });
+    console.error("Smart Upload Error:", err.message);
+    res.status(500).json({ message: err.message || 'Upload failed on all platforms' });
   }
 });
 

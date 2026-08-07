@@ -2,6 +2,7 @@ const ftp = require("basic-ftp");
 const cloudinary = require('cloudinary').v2;
 const { Readable } = require('stream');
 const path = require('path');
+const fs = require('fs');
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -11,7 +12,7 @@ cloudinary.config({
 
 const uploadToHostinger = async (file) => {
   const client = new ftp.Client();
-  // client.ftp.verbose = true;
+  client.ftp.verbose = false;
   try {
     await client.access({
       host: process.env.FTP_HOST,
@@ -21,10 +22,9 @@ const uploadToHostinger = async (file) => {
       secure: false
     });
 
-    const fileName = `masjid_${Date.now()}${path.extname(file.originalname)}`;
+    const fileName = `masjid_${Date.now()}${path.extname(file.originalname || '.jpg')}`;
     const remotePath = `/public_html/masjid_photos/${fileName}`;
 
-    // Ensure directory exists (this might fail if already exists, so we wrap in try/catch or just ignore)
     try { await client.ensureDir("/public_html/masjid_photos"); } catch(e) {}
 
     const source = new Readable();
@@ -34,11 +34,10 @@ const uploadToHostinger = async (file) => {
 
     await client.uploadFrom(source, remotePath);
     
-    // Return the public URL
     return `https://amirhost.in/masjid_photos/${fileName}`;
   } catch (err) {
     console.error("Hostinger FTP Upload Failed:", err.message);
-    throw err; // Throw to trigger fallback
+    throw err;
   } finally {
     client.close();
   }
@@ -62,15 +61,43 @@ const uploadToCloudinary = async (file) => {
   });
 };
 
+const uploadToLocal = async (file) => {
+  const uploadsDir = path.join(__dirname, '../uploads');
+  if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  }
+  const fileName = `masjid_${Date.now()}${path.extname(file.originalname || '.jpg')}`;
+  const filePath = path.join(uploadsDir, fileName);
+  await fs.promises.writeFile(filePath, file.buffer);
+
+  // Return relative URL so clients (Mobile App & Web Admin) automatically resolve to their active API host
+  return `/uploads/${fileName}`;
+};
+
 const smartUpload = async (file) => {
+  // Attempt 1: Hostinger FTP
   try {
-    // Attempt 1: Hostinger
-    console.log("Attempting Hostinger Upload...");
+    console.log("Attempting Hostinger FTP Upload...");
     return await uploadToHostinger(file);
   } catch (err) {
-    // Attempt 2: Cloudinary Fallback
-    console.log("Hostinger failed, falling back to Cloudinary...");
+    console.warn("Hostinger FTP failed:", err.message);
+  }
+
+  // Attempt 2: Cloudinary Fallback
+  try {
+    console.log("Falling back to Cloudinary Upload...");
     return await uploadToCloudinary(file);
+  } catch (err) {
+    console.warn("Cloudinary failed:", err.message);
+  }
+
+  // Attempt 3: Local Server Disk Storage
+  try {
+    console.log("Falling back to Local Server Storage...");
+    return await uploadToLocal(file);
+  } catch (err) {
+    console.error("Local storage upload failed:", err.message);
+    throw new Error("All upload methods failed.");
   }
 };
 
