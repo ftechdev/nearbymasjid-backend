@@ -87,17 +87,31 @@ router.put('/mosques/:id/reject-photo', protect, admin, async (req, res) => {
   res.json({ message: 'Photo rejected', mosque });
 });
 
-// 4. GENERIC ROUTES LAST
+
+// 4. GENERIC ROUTES LAST — Full mosque update by admin
 router.put('/mosques/:id', protect, admin, async (req, res) => {
   const mosque = await Mosque.findByPk(req.params.id);
-  if (mosque) {
-    mosque.isApproved = req.body.isApproved;
-    await mosque.save();
-    res.json(mosque);
-  } else {
-    res.status(404).json({ message: 'Mosque not found' });
+  if (!mosque) return res.status(404).json({ message: 'Mosque not found' });
+
+  const { isApproved, name, address, school, photoUrl, iqamahTimings, timingsApproved, lat, lng } = req.body;
+
+  if (isApproved !== undefined) mosque.isApproved = isApproved;
+  if (name !== undefined) mosque.name = name;
+  if (address !== undefined) mosque.address = address;
+  if (school !== undefined) mosque.school = school;
+  if (photoUrl !== undefined) mosque.photoUrl = photoUrl;
+  if (timingsApproved !== undefined) mosque.timingsApproved = timingsApproved;
+  if (lat !== undefined && !isNaN(parseFloat(lat))) mosque.lat = parseFloat(lat);
+  if (lng !== undefined && !isNaN(parseFloat(lng))) mosque.lng = parseFloat(lng);
+  if (iqamahTimings !== undefined) {
+    const raw = typeof iqamahTimings === 'string' ? JSON.parse(iqamahTimings) : iqamahTimings;
+    mosque.iqamahTimings = raw;
   }
+
+  await mosque.save();
+  res.json(mosque);
 });
+
 
 router.delete('/mosques/:id', protect, admin, async (req, res) => {
   const mosque = await Mosque.findByPk(req.params.id);

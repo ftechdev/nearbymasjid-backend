@@ -215,20 +215,6 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 5000;
 
-// Self-ping mechanism to keep Render free tier alive
-const selfPing = () => {
-  const url = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
-  setInterval(() => {
-    const client = url.startsWith('https') ? require('https') : require('http');
-    client.get(`${url}/api/ping`, (res) => {
-      if (res.statusCode === 200) console.log(`Self-ping successful: ${url}`);
-    }).on('error', (err) => {
-      console.log('Self-ping error:', err.message);
-    });
-  }, 14 * 60 * 1000); // 14 minutes
-};
-
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT} at http://0.0.0.0:${PORT}`);
-  selfPing();
 });
