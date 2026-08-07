@@ -151,7 +151,8 @@ router.post('/users/create-admin', protect, admin, async (req, res) => {
     const user = await User.create({ name, email, password, role: 'admin' });
     res.status(201).json({ id: user.id, name: user.name, email: user.email, role: user.role });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    console.error('create-admin error:', err);
+    res.status(500).json({ message: 'Failed to create admin account' });
   }
 });
 
@@ -300,7 +301,7 @@ router.post('/settings/default-timings', protect, admin, async (req, res) => {
     res.json({ message: 'Default timings updated', timings: setting.value });
   } catch (err) {
     console.error('POST default timings error:', err);
-    res.status(500).json({ message: 'Server Error', detail: err.message });
+    res.status(500).json({ message: 'Server Error' });
   }
 });
 

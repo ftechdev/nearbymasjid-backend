@@ -10,8 +10,10 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
+const FTP_UPLOAD_DIR = '/uploads';
+
 const uploadToHostinger = async (file) => {
-  const client = new ftp.Client();
+  const client = new ftp.Client(15000); // 15s timeout so a hung connection fails fast into the Cloudinary/local fallback
   client.ftp.verbose = false;
   try {
     await client.access({
@@ -23,9 +25,9 @@ const uploadToHostinger = async (file) => {
     });
 
     const fileName = `masjid_${Date.now()}${path.extname(file.originalname || '.jpg')}`;
-    const remotePath = `/public_html/masjid_photos/${fileName}`;
+    const remotePath = `${FTP_UPLOAD_DIR}/${fileName}`;
 
-    try { await client.ensureDir("/public_html/masjid_photos"); } catch(e) {}
+    try { await client.ensureDir(FTP_UPLOAD_DIR); } catch(e) {}
 
     const source = new Readable();
     source._read = () => {};
@@ -33,8 +35,11 @@ const uploadToHostinger = async (file) => {
     source.push(null);
 
     await client.uploadFrom(source, remotePath);
-    
-    return `https://amirhost.in/masjid_photos/${fileName}`;
+
+    // Derived from FTP_HOST (ftp.<domain>) instead of a hardcoded domain, so
+    // rotating/changing the FTP host doesn't also require a code edit here.
+    const publicHost = (process.env.FTP_HOST || '').replace(/^ftp\./i, '');
+    return `https://${publicHost}${FTP_UPLOAD_DIR}/${fileName}`;
   } catch (err) {
     console.error("Hostinger FTP Upload Failed:", err.message);
     throw err;

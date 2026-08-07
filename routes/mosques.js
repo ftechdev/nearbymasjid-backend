@@ -102,7 +102,7 @@ router.get('/', async (req, res) => {
     res.json(mosques);
   } catch (err) {
     console.error('[mosques GET] Fatal error:', err.message, err.stack);
-    res.status(500).json({ message: 'Server Error', detail: err.message });
+    res.status(500).json({ message: 'Server Error' });
   }
 });
 
@@ -114,11 +114,18 @@ router.post('/', protect, writeLimiter, async (req, res) => {
       return res.status(400).json({ message: 'Name, address and location are required' });
     }
 
-    // Check for existing mosques at the same location (proximity check ~100m)
-    const existingMosques = await Mosque.findAll();
+    // Check for existing mosques at the same location (proximity check ~100m).
+    // Bounded to a small box around the submitted point instead of loading
+    // every mosque row, so this doesn't get slower as the table grows.
     const threshold = 0.0009; // Approx 100 meters in degrees
-    const duplicate = existingMosques.find(m => 
-      Math.abs(m.lat - location.lat) < threshold && 
+    const nearbyMosques = await Mosque.findAll({
+      where: {
+        lat: { [Op.between]: [location.lat - threshold, location.lat + threshold] },
+        lng: { [Op.between]: [location.lng - threshold, location.lng + threshold] },
+      },
+    });
+    const duplicate = nearbyMosques.find(m =>
+      Math.abs(m.lat - location.lat) < threshold &&
       Math.abs(m.lng - location.lng) < threshold
     );
 
@@ -203,7 +210,7 @@ router.post('/upload-photo', protect, writeLimiter, (req, res, next) => {
     res.json({ photoUrl });
   } catch (err) {
     console.error("Smart Upload Error:", err.message);
-    res.status(500).json({ message: err.message || 'Upload failed on all platforms' });
+    res.status(500).json({ message: 'Upload failed. Please try again.' });
   }
 });
 

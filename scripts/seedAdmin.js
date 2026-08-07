@@ -3,10 +3,14 @@ const User = require('../models/User');
 
 const seedAdmin = async () => {
   try {
+    const adminEmail = process.env.ADMIN_EMAIL;
+    const adminPassword = process.env.ADMIN_PASSWORD;
+    if (!adminEmail || !adminPassword) {
+      console.error('Set ADMIN_EMAIL and ADMIN_PASSWORD environment variables before running this script.');
+      process.exit(1);
+    }
+
     await connectDB();
-    
-    const adminEmail = 'admin@masjid.com';
-    const adminPassword = 'adminpassword123';
 
     const existingAdmin = await User.findOne({ where: { email: adminEmail } });
     if (existingAdmin) {
@@ -24,10 +28,9 @@ const seedAdmin = async () => {
     }
     
     console.log('---------------------------');
-    console.log('Email: ' + adminEmail);
-    console.log('Password: ' + adminPassword);
+    console.log('Admin ready: ' + adminEmail);
     console.log('---------------------------');
-    
+
     process.exit();
   } catch (error) {
     console.error('Error seeding admin:', error);

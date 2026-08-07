@@ -2,7 +2,21 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
 const { connectDB } = require('./config/db');
+
+// Without a handler, Node already exits on these — but silently, with no log
+// line explaining why (Render just shows "exited"). Log first, then exit the
+// same way, so Render's restart is accompanied by a reason in the logs.
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled Rejection:', reason);
+  process.exit(1);
+});
 
 const app = express();
 
@@ -18,6 +32,8 @@ app.use(helmet({
   // origin (the app, a future website, etc.) — same-origin would needlessly block that.
   crossOriginResourcePolicy: false,
 }));
+
+app.use(compression());
 
 connectDB();
 
@@ -39,6 +55,19 @@ app.use(cors({
 
 app.use(express.json());
 app.use('/uploads', express.static('uploads'));
+
+// Baseline protection for every /api route — auth.js and mosques.js already
+// layer tighter limiters (authLimiter, writeLimiter) on their sensitive
+// endpoints; this just ensures nothing (admin.js, quotes.js, reviews.js,
+// settings.js, and the public GET /api/mosques) is left completely open.
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  message: { message: 'Too many requests. Please try again shortly.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/api', apiLimiter);
 
 // Routes
 app.use('/api/auth', require('./routes/auth'));
@@ -212,14 +241,26 @@ app.get('/api/ping', (req, res) => {
   res.status(200).json({ status: 'ok', message: 'Pong! Server is hot.', timestamp: new Date() });
 });
 
-// Global error handler
+// Global error handler — deliberate client-fault errors (4xx, set by a route)
+// pass their message through; anything else (500s: raw DB/library errors,
+// unexpected throws) is logged in full server-side but never shown to the client.
 app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ message: err.message || 'Internal Server Error' });
+  console.error(err.stack || err);
+  const status = err.statusCode || err.status || 500;
+  const message = status < 500 ? err.message : 'Internal Server Error';
+  res.status(status).json({ message });
 });
 
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, '0.0.0.0', () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT} at http://0.0.0.0:${PORT}`);
+});
+
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received — closing server gracefully...');
+  server.close(() => {
+    console.log('Server closed.');
+    process.exit(0);
+  });
 });

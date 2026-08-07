@@ -1,6 +1,7 @@
 /**
- * Run once to create the admin user:
- *   node scripts/createAdmin.js
+ * Run once to create (or promote) the admin user. Credentials come from
+ * environment variables so no live password is ever hardcoded/committed:
+ *   ADMIN_NAME=Admin ADMIN_EMAIL=you@example.com ADMIN_PASSWORD=... node scripts/createAdmin.js
  */
 require('dotenv').config();
 const { Sequelize } = require('sequelize');
@@ -14,11 +15,16 @@ const sequelize = new Sequelize(
 );
 
 const ADMIN = {
-  name:     'Admin',
-  email:    'admin@gmail.com',
-  password: 'admin123',
+  name:     process.env.ADMIN_NAME || 'Admin',
+  email:    process.env.ADMIN_EMAIL,
+  password: process.env.ADMIN_PASSWORD,
   role:     'admin',
 };
+
+if (!ADMIN.email || !ADMIN.password) {
+  console.error('❌ Set ADMIN_EMAIL and ADMIN_PASSWORD environment variables before running this script.');
+  process.exit(1);
+}
 
 (async () => {
   try {
@@ -57,9 +63,7 @@ const ADMIN = {
 
     console.log('');
     console.log('─────────────────────────────────');
-    console.log('  Admin Login Credentials');
-    console.log('  Email   : admin@gmail.com');
-    console.log('  Password: admin123');
+    console.log(`  Admin ready: ${ADMIN.email}`);
     console.log('─────────────────────────────────');
 
     await sequelize.close();
