@@ -91,7 +91,6 @@ app.post('/api/notifications/register-token', (req, res) => {
 app.post('/api/notifications/dissociate-token', (req, res) => {
   res.json({ status: 'ok', message: 'Notification push token dissociated successfully' });
 });
-
 // ── TEMPORARY one-time file seed endpoint ──────────────────────────────────
 // Lets us upload existing local image files to the hosted server's /uploads/
 // folder without needing FTP. Secured by ADMIN_SEED_SECRET env var.
