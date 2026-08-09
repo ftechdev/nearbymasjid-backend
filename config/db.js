@@ -8,9 +8,26 @@ const sequelize = new Sequelize(
   {
     host: process.env.DB_HOST,
     dialect: 'mysql',
-    logging: false, // Set to console.log to see SQL queries
+    logging: false,
+    // ── Connection Pool (critical for Hostinger MySQL) ─────────────────────
+    // Hostinger's MySQL server closes idle connections after its wait_timeout.
+    // Without pool eviction, Sequelize holds stale connections and the first
+    // request after a quiet period hits a "Cannot enqueue" / ECONNRESET error.
+    pool: {
+      max: 5,           // max open connections
+      min: 0,           // allow pool to drop to zero when idle
+      acquire: 30000,   // ms to wait for a connection before throwing error
+      idle: 600000,     // 10 min — release a connection if unused this long
+      evict: 60000,     // every 60s, evict connections idle > `idle` ms above
+    },
+    dialectOptions: {
+      // Keep the underlying TCP socket alive so the OS doesn't drop it
+      // before Sequelize's pool eviction notices the connection is stale.
+      connectTimeout: 30000,
+    },
   }
 );
+
 
 const connectDB = async () => {
   try {

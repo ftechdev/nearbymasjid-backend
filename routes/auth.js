@@ -169,7 +169,7 @@ router.post('/forgot-password', authLimiter, async (req, res) => {
       user.resetTokenExpiry = new Date(Date.now() + 30 * 60 * 1000);
       await user.save();
 
-      const baseUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT || 5000}`;
+      const baseUrl = process.env.API_PUBLIC_URL || `http://localhost:${process.env.PORT || 5000}`;
       const resetLink = `${baseUrl}/reset-password?token=${token}`;
       // Fire-and-forget — don't block the response on SMTP
       sendPasswordResetEmail(user.email, user.name, resetLink).catch(e => console.error('Reset email failed:', e.message));

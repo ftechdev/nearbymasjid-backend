@@ -46,7 +46,7 @@ router.get('/', async (req, res) => {
     mosques = mosques.map(m => {
       let data = m.toJSON ? m.toJSON() : m;
       if (typeof data.iqamahTimings === 'string') {
-        try { data.iqamahTimings = JSON.parse(data.iqamahTimings); } catch (e) {}
+        try { data.iqamahTimings = JSON.parse(data.iqamahTimings); } catch (e) { }
       }
       return data;
     });
@@ -59,12 +59,12 @@ router.get('/', async (req, res) => {
         m.address?.toLowerCase().includes(kw)
       );
     }
-    
+
     if (lat && lng && process.env.GOOGLE_MAPS_API_KEY) {
       try {
         const searchKeyword = keyword ? `${keyword} masjid` : 'masjid';
         const googleRes = await axios.get(`https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=20000&type=mosque&keyword=${encodeURIComponent(searchKeyword)}&key=${process.env.GOOGLE_MAPS_API_KEY}`);
-        
+
         if (googleRes.data && googleRes.data.status !== 'OK' && googleRes.data.status !== 'ZERO_RESULTS') {
           console.error('Google Places API Status:', googleRes.data.status, googleRes.data.error_message || '');
         }
@@ -73,7 +73,7 @@ router.get('/', async (req, res) => {
           const googleMosques = googleRes.data.results.map(place => {
             // Check if this google masjid already has timings in our DB
             const localMatch = mosques.find(m => m.googlePlaceId === place.place_id);
-            
+
             return {
               id: place.place_id,
               name: place.name,
@@ -81,7 +81,7 @@ router.get('/', async (req, res) => {
               lat: place.geometry.location.lat,
               lng: place.geometry.location.lng,
               rating: place.rating || 0,
-              photoUrl: place.photos && place.photos.length > 0 
+              photoUrl: place.photos && place.photos.length > 0
                 ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference=${place.photos[0].photo_reference}&key=${process.env.GOOGLE_MAPS_API_KEY}`
                 : null,
               iqamahTimings: localMatch ? localMatch.iqamahTimings : null,
@@ -89,7 +89,7 @@ router.get('/', async (req, res) => {
               isGoogle: true
             };
           });
-          
+
           // Filter out google results that we are already showing from DB to avoid duplicates
           const uniqueGoogle = googleMosques.filter(g => !mosques.some(m => m.googlePlaceId === g.id));
           mosques = [...mosques, ...uniqueGoogle];
@@ -98,7 +98,7 @@ router.get('/', async (req, res) => {
         console.error('Google API Request Failed:', err.message);
       }
     }
-    
+
     res.json(mosques);
   } catch (err) {
     console.error('[mosques GET] Fatal error:', err.message, err.stack);
@@ -223,13 +223,13 @@ router.put('/:id/timings', protect, writeLimiter, async (req, res) => {
     // Try finding by internal PK (UUID)
     try {
       mosque = await Mosque.findByPk(req.params.id);
-    } catch {}
+    } catch { }
 
     // If still not found, try finding by googlePlaceId
     if (!mosque) {
       mosque = await Mosque.findOne({ where: { googlePlaceId: req.params.id } });
     }
-    
+
     // If NOT found and mosqueData is provided, create it as a new DB record
     if (!mosque && mosqueData) {
       mosque = await Mosque.create({
@@ -284,7 +284,7 @@ router.put('/:id/photo', protect, writeLimiter, async (req, res) => {
     let mosque = null;
     try {
       mosque = await Mosque.findByPk(req.params.id);
-    } catch {}
+    } catch { }
 
     if (!mosque) {
       mosque = await Mosque.findOne({ where: { googlePlaceId: req.params.id } });
@@ -344,7 +344,7 @@ router.get('/:id', async (req, res) => {
     let mosque = null;
     try {
       mosque = await Mosque.findByPk(req.params.id);
-    } catch {}
+    } catch { }
     if (!mosque) {
       mosque = await Mosque.findOne({ where: { googlePlaceId: req.params.id } });
     }
@@ -354,7 +354,7 @@ router.get('/:id', async (req, res) => {
 
     const data = mosque.toJSON();
     if (typeof data.iqamahTimings === 'string') {
-      try { data.iqamahTimings = JSON.parse(data.iqamahTimings); } catch {}
+      try { data.iqamahTimings = JSON.parse(data.iqamahTimings); } catch { }
     }
     res.json(data);
   } catch (err) {

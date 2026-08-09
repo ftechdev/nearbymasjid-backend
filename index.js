@@ -8,21 +8,22 @@ const path = require('path');
 const fs = require('fs');
 const { connectDB } = require('./config/db');
 
-// Without a handler, Node already exits on these — but silently, with no log
-// line explaining why (Render just shows "exited"). Log first, then exit the
-// same way, so Render's restart is accompanied by a reason in the logs.
+// Without a handler, Node already exits on these — but silently, with no log.
+// Log first, then exit the same way so the host's restart is explained in logs.
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
   process.exit(1);
 });
 process.on('unhandledRejection', (reason) => {
-  console.error('Unhandled Rejection:', reason);
-  process.exit(1);
+  // Log but do NOT exit — transient rejections (Google API timeout, DB hiccup)
+  // should not take down the server and cause unexpected restarts.
+  console.error('Unhandled Rejection (non-fatal):', reason);
 });
+
 
 const app = express();
 
-// Trust Render/proxy X-Forwarded-For so express-rate-limit works correctly
+// Trust Hostinger's reverse proxy X-Forwarded-For so express-rate-limit works correctly
 app.set('trust proxy', 1);
 
 app.use(helmet({
