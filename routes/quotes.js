@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Op } = require('sequelize');
+const { Op, Transaction } = require('sequelize');
 const { sequelize } = require('../config/db');
 const Quote = require('../models/Quote');
 const { protect, admin } = require('../middleware/auth');
@@ -13,7 +13,7 @@ router.get('/daily', async (req, res) => {
     const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
 
     let dailyQuote = await sequelize.transaction(
-      { isolationLevel: sequelize.Transaction.ISOLATION_LEVELS.SERIALIZABLE },
+      { isolationLevel: Transaction.ISOLATION_LEVELS.SERIALIZABLE },
       async (t) => {
         // 1. Already assigned for today?
         let quote = await Quote.findOne({ where: { lastShownDate: today }, transaction: t });
