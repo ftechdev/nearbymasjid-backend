@@ -151,12 +151,7 @@ router.get('/', async (req, res) => {
       mosques = [...mosques, ...uniqueGoogle];
     }
 
-    res.json({
-      mosques,
-      total: count,
-      page,
-      totalPages: Math.ceil(count / limit),
-    });
+    res.json(mosques);
   } catch (err) {
     console.error('[mosques GET] Fatal error:', err.message, err.stack);
     res.status(500).json({ message: 'Server Error' });
