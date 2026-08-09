@@ -9,9 +9,9 @@ const { protect } = require('../middleware/auth');
 const { sendPasswordResetEmail } = require('../utils/mailer');
 
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 20,
-  message: { message: 'Too many requests. Please try again in 15 minutes.' },
+  message: { message: 'Too many login attempts. Please wait 15 minutes before trying again.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -20,57 +20,81 @@ const generateToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '30d' });
 };
 
-// POST /api/auth/register
+// ── POST /api/auth/register ────────────────────────────────────────────────────
 router.post('/register', authLimiter, async (req, res) => {
   try {
     const { name, email, password } = req.body;
 
-    if (!name || !email || !password) {
-      return res.status(400).json({ message: 'Please provide name, email, and password' });
+    // Field-level validation — tell the user exactly what is missing
+    if (!name || !name.trim()) {
+      return res.status(400).json({ message: 'Full name is required.' });
     }
-
+    if (!email || !email.trim()) {
+      return res.status(400).json({ message: 'Email address is required.' });
+    }
+    // Basic email format check
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      return res.status(400).json({ message: 'Please enter a valid email address (e.g. user@example.com).' });
+    }
+    if (!password) {
+      return res.status(400).json({ message: 'Password is required.' });
+    }
     if (password.length < 6) {
-      return res.status(400).json({ message: 'Password must be at least 6 characters' });
+      return res.status(400).json({ message: `Password is too short — it must be at least 6 characters (you entered ${password.length}).` });
     }
 
-    const userExists = await User.findOne({ where: { email } });
+    const userExists = await User.findOne({ where: { email: email.trim().toLowerCase() } });
     if (userExists) {
-      return res.status(400).json({ message: 'An account with this email already exists' });
+      return res.status(400).json({ message: 'An account with this email already exists. Try logging in instead, or use "Forgot Password" if you\'ve lost access.' });
     }
 
-    const user = await User.create({ name, email, password });
+    const user = await User.create({ name: name.trim(), email: email.trim().toLowerCase(), password });
 
     res.status(201).json({
       _id: user.id,
       name: user.name,
       email: user.email,
       role: user.role,
-      token: generateToken(user.id)
+      token: generateToken(user.id),
     });
   } catch (error) {
-    console.error('Register Error:', error);
-    res.status(500).json({ message: 'Server error during registration. Please try again.' });
+    console.error('[register] Error:', error);
+    res.status(500).json({ message: 'Registration failed due to a server error. Please try again in a moment.' });
   }
 });
 
-// POST /api/auth/login
+// ── POST /api/auth/login ───────────────────────────────────────────────────────
 router.post('/login', authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    if (!email || !password) {
-      return res.status(400).json({ message: 'Please provide email and password' });
+    if (!email || !email.trim()) {
+      return res.status(400).json({ message: 'Email address is required.' });
+    }
+    if (!password) {
+      return res.status(400).json({ message: 'Password is required.' });
     }
 
-    const user = await User.findOne({ where: { email } });
+    const user = await User.findOne({ where: { email: email.trim().toLowerCase() } });
 
-    if (!user || !user.password) {
-      return res.status(401).json({ message: 'Invalid email or password' });
+    // NOTE: We intentionally use the same message for "user not found" and
+    // "wrong password" to avoid leaking which emails are registered.
+    // The real reason is logged server-side for debugging.
+    if (!user) {
+      console.warn(`[login] Failed — no account found for email: ${email}`);
+      return res.status(401).json({ message: 'Incorrect email or password. Please check your details and try again.' });
+    }
+
+    if (!user.password) {
+      // This account was created via Google OAuth — it has no password
+      console.warn(`[login] Failed — account ${email} was registered with Google and has no password.`);
+      return res.status(401).json({ message: 'This account was created with Google Sign-In. Please use "Continue with Google" to log in.' });
     }
 
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
-      return res.status(401).json({ message: 'Invalid email or password' });
+      console.warn(`[login] Failed — wrong password for email: ${email}`);
+      return res.status(401).json({ message: 'Incorrect email or password. Please check your details and try again.' });
     }
 
     res.json({
@@ -78,45 +102,63 @@ router.post('/login', authLimiter, async (req, res) => {
       name: user.name,
       email: user.email,
       role: user.role,
-      token: generateToken(user.id)
+      token: generateToken(user.id),
     });
   } catch (error) {
-    console.error('Login Error:', error);
-    res.status(500).json({ message: 'Server error during login. Please try again.' });
+    console.error('[login] Error:', error);
+    res.status(500).json({ message: 'Login failed due to a server error. Please try again in a moment.' });
   }
 });
 
-// POST /api/auth/google
+// ── POST /api/auth/google ──────────────────────────────────────────────────────
 router.post('/google', authLimiter, async (req, res) => {
   try {
     const { idToken } = req.body;
 
     if (!idToken) {
-      return res.status(400).json({ message: 'Google token is required' });
+      return res.status(400).json({ message: 'Google sign-in token is missing. Please try signing in again.' });
     }
 
-    // Create client fresh each request so it always uses current env value
+    if (!process.env.GOOGLE_CLIENT_ID) {
+      console.error('[google-auth] GOOGLE_CLIENT_ID is not set in environment variables.');
+      return res.status(500).json({ message: 'Google Sign-In is not configured on the server. Please contact support.' });
+    }
+
     const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-    const ticket = await googleClient.verifyIdToken({
-      idToken: idToken,
-      audience: process.env.GOOGLE_CLIENT_ID,
-    });
+    let ticket;
+    try {
+      ticket = await googleClient.verifyIdToken({
+        idToken,
+        audience: process.env.GOOGLE_CLIENT_ID,
+      });
+    } catch (verifyErr) {
+      console.error('[google-auth] Token verification failed:', verifyErr.message);
+      if (verifyErr.message?.includes('Token used too late')) {
+        return res.status(401).json({ message: 'Your Google session has expired. Please sign in with Google again.' });
+      }
+      if (verifyErr.message?.includes('Wrong recipient')) {
+        return res.status(401).json({ message: 'Google Client ID mismatch — the app is misconfigured. Please contact support.' });
+      }
+      if (verifyErr.message?.includes('Invalid token signature')) {
+        return res.status(401).json({ message: 'Google token is invalid or has been tampered with. Please sign in again.' });
+      }
+      return res.status(401).json({ message: 'Google sign-in could not be verified. Please try again.' });
+    }
 
     const payload = ticket.getPayload();
-    const { email, name, picture } = payload;
+    const { email, name } = payload;
 
     if (!email) {
-      return res.status(400).json({ message: 'Could not get email from Google account' });
+      return res.status(400).json({ message: 'Your Google account does not have a public email address. Please use a different sign-in method.' });
     }
 
     let user = await User.findOne({ where: { email } });
-
     if (!user) {
       user = await User.create({
         name: name || email.split('@')[0],
         email,
-        // No password for Google users
+        // No password — Google users authenticate via Google only
       });
     }
 
@@ -125,22 +167,15 @@ router.post('/google', authLimiter, async (req, res) => {
       name: user.name,
       email: user.email,
       role: user.role,
-      token: generateToken(user.id)
+      token: generateToken(user.id),
     });
   } catch (error) {
-    console.error('Google Auth Error:', error.message);
-    console.error('GOOGLE_CLIENT_ID in use:', process.env.GOOGLE_CLIENT_ID);
-    if (error.message && error.message.includes('Token used too late')) {
-      return res.status(401).json({ message: 'Google session expired. Please try again.' });
-    }
-    if (error.message && error.message.includes('Wrong recipient')) {
-      return res.status(401).json({ message: 'Google Client ID mismatch. Contact support.' });
-    }
-    res.status(401).json({ message: 'Google sign-in failed. Please try again.' });
+    console.error('[google-auth] Unexpected error:', error.message);
+    res.status(500).json({ message: 'Google sign-in failed due to a server error. Please try again.' });
   }
 });
 
-// GET /api/auth/me - Get current user profile
+// ── GET /api/auth/me ───────────────────────────────────────────────────────────
 router.get('/me', protect, async (req, res) => {
   try {
     res.json({
@@ -150,65 +185,88 @@ router.get('/me', protect, async (req, res) => {
       role: req.user.role,
     });
   } catch (error) {
-    res.status(500).json({ message: 'Server error' });
+    console.error('[auth/me] Error:', error);
+    res.status(500).json({ message: 'Could not fetch your profile. Please try again.' });
   }
 });
 
-// POST /api/auth/forgot-password — emails a one-tap reset link (opens the
-// /reset-password web page, which posts straight to /reset-password below)
+// ── POST /api/auth/forgot-password ────────────────────────────────────────────
 router.post('/forgot-password', authLimiter, async (req, res) => {
   try {
     const { email } = req.body;
-    if (!email) return res.status(400).json({ message: 'Email is required' });
-
-    const user = await User.findOne({ where: { email } });
-
-    if (user) {
-      const token = crypto.randomBytes(32).toString('hex');
-      user.resetToken = token;
-      user.resetTokenExpiry = new Date(Date.now() + 30 * 60 * 1000);
-      await user.save();
-
-      const baseUrl = process.env.API_PUBLIC_URL || `http://localhost:${process.env.PORT || 5000}`;
-      const resetLink = `${baseUrl}/reset-password?token=${token}`;
-      // Fire-and-forget — don't block the response on SMTP
-      sendPasswordResetEmail(user.email, user.name, resetLink).catch(e => console.error('Reset email failed:', e.message));
+    if (!email || !email.trim()) {
+      return res.status(400).json({ message: 'Please enter your email address to receive a reset link.' });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      return res.status(400).json({ message: 'Please enter a valid email address.' });
     }
 
-    res.json({ message: 'If an account with that email exists, a reset link has been sent.' });
+    const user = await User.findOne({ where: { email: email.trim().toLowerCase() } });
+
+    if (user) {
+      if (!user.password) {
+        // Google account — no point sending a password reset
+        console.warn(`[forgot-password] Skipped — account ${email} uses Google Sign-In (no password).`);
+        // Still returns the generic message so we don't leak which emails exist
+      } else {
+        const token = crypto.randomBytes(32).toString('hex');
+        user.resetToken = token;
+        user.resetTokenExpiry = new Date(Date.now() + 30 * 60 * 1000); // 30 min
+        await user.save();
+
+        const baseUrl = process.env.API_PUBLIC_URL || `http://localhost:${process.env.PORT || 5000}`;
+        const resetLink = `${baseUrl}/reset-password?token=${token}`;
+        sendPasswordResetEmail(user.email, user.name, resetLink)
+          .catch(e => console.error('[forgot-password] Email send failed:', e.message));
+      }
+    } else {
+      console.warn(`[forgot-password] No account found for email: ${email}`);
+    }
+
+    // Always return the same message — prevents email enumeration attacks
+    res.json({ message: 'If an account with that email exists, a reset link has been sent. Check your inbox (and spam folder).' });
   } catch (error) {
-    console.error('Forgot Password Error:', error);
-    res.status(500).json({ message: 'Server error. Please try again.' });
+    console.error('[forgot-password] Error:', error);
+    res.status(500).json({ message: 'Could not process your request. Please try again in a moment.' });
   }
 });
 
-// POST /api/auth/reset-password — called by the web page the reset link opens
-router.post('/reset-password', async (req, res) => {
+// ── POST /api/auth/reset-password ─────────────────────────────────────────────
+router.post('/reset-password', authLimiter, async (req, res) => {
   try {
     const { token, newPassword } = req.body;
-    if (!token || !newPassword) {
-      return res.status(400).json({ message: 'Missing token or new password' });
+
+    if (!token) {
+      return res.status(400).json({ message: 'Reset token is missing. Please use the link from your email.' });
+    }
+    if (!newPassword) {
+      return res.status(400).json({ message: 'New password is required.' });
     }
     if (newPassword.length < 6) {
-      return res.status(400).json({ message: 'Password must be at least 6 characters' });
+      return res.status(400).json({ message: `New password is too short — minimum 6 characters (you entered ${newPassword.length}).` });
     }
 
     const user = await User.findOne({ where: { resetToken: token } });
 
-    if (!user || !user.resetTokenExpiry || new Date() > new Date(user.resetTokenExpiry)) {
-      return res.status(400).json({ message: 'Invalid or expired reset link. Please request a new one.' });
+    if (!user) {
+      console.warn('[reset-password] Token not found in DB — already used or invalid.');
+      return res.status(400).json({ message: 'This reset link is invalid. It may have already been used. Please request a new one from the app.' });
     }
 
-    // Update password (model hook will hash it)
+    if (!user.resetTokenExpiry || new Date() > new Date(user.resetTokenExpiry)) {
+      console.warn(`[reset-password] Token expired for user: ${user.email}`);
+      return res.status(400).json({ message: 'This reset link has expired (links are valid for 30 minutes). Please request a new one from the app.' });
+    }
+
     user.password = newPassword;
     user.resetToken = null;
     user.resetTokenExpiry = null;
     await user.save();
 
-    res.json({ message: 'Password has been reset successfully' });
+    res.json({ message: 'Password has been reset successfully. You can now log in with your new password.' });
   } catch (error) {
-    console.error('Reset Password Error:', error);
-    res.status(500).json({ message: 'Server error. Please try again.' });
+    console.error('[reset-password] Error:', error);
+    res.status(500).json({ message: 'Could not reset your password due to a server error. Please try again.' });
   }
 });
 

@@ -9,48 +9,44 @@ const sequelize = new Sequelize(
     host: process.env.DB_HOST,
     dialect: 'mysql',
     logging: false,
-    // ── Connection Pool (critical for Hostinger MySQL) ─────────────────────
-    // Hostinger's MySQL server closes idle connections after its wait_timeout.
-    // Without pool eviction, Sequelize holds stale connections and the first
-    // request after a quiet period hits a "Cannot enqueue" / ECONNRESET error.
+    // ── Connection Pool (Optimized for Hostinger MySQL) ────────────────────
     pool: {
-      max: 5,           // max open connections
-      min: 0,           // allow pool to drop to zero when idle
-      acquire: 30000,   // ms to wait for a connection before throwing error
-      idle: 600000,     // 10 min — release a connection if unused this long
-      evict: 60000,     // every 60s, evict connections idle > `idle` ms above
+      max: 10,          // Max concurrent open connections
+      min: 1,           // Keep at least 1 active connection warm at all times
+      acquire: 30000,   // Max ms to wait for connection
+      idle: 30000,      // Release extra idle connections after 30s
+      evict: 15000,     // Evict stale connections every 15s
     },
     dialectOptions: {
-      // Keep the underlying TCP socket alive so the OS doesn't drop it
-      // before Sequelize's pool eviction notices the connection is stale.
       connectTimeout: 30000,
+      enableKeepAlive: true,  // mysql2 dialect option for TCP socket keep-alive
     },
   }
 );
 
+/**
+ * Background Keep-Alive Ping
+ * Runs a light `SELECT 1` query every 3 minutes so Hostinger MySQL never closes
+ * idle connections or puts the database connection into a sleep/timeout state.
+ */
+function startDbKeepAlive() {
+  setInterval(async () => {
+    try {
+      await sequelize.query('SELECT 1;');
+      // console.log('🟢 DB Keep-Alive ping OK');
+    } catch (err) {
+      console.warn('⚠️ DB Keep-Alive ping hiccup:', err.message);
+    }
+  }, 3 * 60 * 1000); // Every 3 minutes
+}
 
 const connectDB = async () => {
   try {
     await sequelize.authenticate();
-    // Ensure columns exist manually to prevent crashes
-    // try {
-    //   await sequelize.query("ALTER TABLE Mosques ADD COLUMN iqamahTimings JSON");
-    // } catch (e) { /* already exists */ }
-    // try {
-    //   await sequelize.query("ALTER TABLE Mosques ADD COLUMN timingsApproved TINYINT DEFAULT 1");
-    // } catch (e) { /* already exists */ }
-    // try {
-    //   await sequelize.query("ALTER TABLE Mosques ADD COLUMN googlePlaceId VARCHAR(255) UNIQUE");
-    // } catch (e) { /* already exists */ }
-    // try {
-    //   await sequelize.query("ALTER TABLE Mosques ADD COLUMN photoUrl VARCHAR(500)");
-    // } catch (e) { /* already exists */ }
-    // try {
-    //   await sequelize.query("ALTER TABLE Mosques ADD COLUMN school ENUM('hanafi','shafi') DEFAULT 'shafi'");
-    // } catch (e) { /* already exists */ }
-    // try {
-    //   await sequelize.query("ALTER TABLE Mosques ADD COLUMN userId VARCHAR(36)");
-    // } catch (e) { /* already exists */ }
+    console.log('✅ MySQL Database Connected Successfully');
+
+    // Start background keep-alive ping so Hostinger MySQL never drops idle connections
+    startDbKeepAlive();
 
     // Import models before syncing
     require('../models/User');
@@ -59,14 +55,7 @@ const connectDB = async () => {
     require('../models/AppReview');
     require('../models/Settings');
 
-    // Password-reset link columns (replaced the old OTP-based reset — resetOtp /
-    // resetOtpExpiry below are legacy and no longer read by any route)
-    try {
-      await sequelize.query("ALTER TABLE Users ADD COLUMN resetOtp VARCHAR(6) NULL");
-    } catch (e) { /* column already exists */ }
-    try {
-      await sequelize.query("ALTER TABLE Users ADD COLUMN resetOtpExpiry DATETIME NULL");
-    } catch (e) { /* column already exists */ }
+    // Password-reset link columns — added once, silently skipped on subsequent boots
     try {
       await sequelize.query("ALTER TABLE Users ADD COLUMN resetToken VARCHAR(128) NULL");
     } catch (e) { /* column already exists */ }
@@ -85,16 +74,14 @@ const connectDB = async () => {
       await sequelize.query("ALTER TABLE Mosques ADD COLUMN timingsSubmittedBy JSON NULL");
     } catch (e) { /* column already exists */ }
 
-    // Speeds up the nearby-mosques search (GET /api/mosques), which filters by all
-    // three of these columns together. sync() below only creates indexes on brand-new
-    // tables, so add it manually here too for databases that already existed before it.
+    // Speeds up nearby-mosques queries
     try {
       await sequelize.query("CREATE INDEX mosques_approved_lat_lng ON Mosques (isApproved, lat, lng)");
     } catch (e) { /* index already exists */ }
 
-    await sequelize.sync(); // Just sync, don't alter
+    await sequelize.sync();
   } catch (error) {
-    console.error('MySQL connection error:', error.message);
+    console.error('❌ MySQL connection error:', error.message);
     process.exit(1);
   }
 };

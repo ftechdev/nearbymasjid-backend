@@ -33,9 +33,19 @@ const Mosque = sequelize.define('Mosque', {
     allowNull: true,
     unique: true,
   },
+  // Stored as JSON; getter ensures it always comes back as an object (never a string)
+  // regardless of how MySQL/Sequelize serialised it.
   iqamahTimings: {
-    type: DataTypes.JSON, // { fajr: '05:30', dhuhr: '13:30', ... }
+    type: DataTypes.JSON,
     allowNull: true,
+    get() {
+      const raw = this.getDataValue('iqamahTimings');
+      if (!raw) return null;
+      if (typeof raw === 'string') {
+        try { return JSON.parse(raw); } catch { return null; }
+      }
+      return raw;
+    },
   },
   timingsApproved: {
     type: DataTypes.BOOLEAN,
@@ -45,9 +55,8 @@ const Mosque = sequelize.define('Mosque', {
     type: DataTypes.STRING(500),
     allowNull: true,
   },
-  // Set whenever someone updates an existing mosque's photo after creation; the live
-  // photoUrl above only changes once an admin approves it (see /mosques/:id/photo and
-  // /admin/mosques/:id/approve-photo).
+  // Pending replacement photo — goes live only after admin approves it.
+  // The live photoUrl above is untouched until then.
   pendingPhotoUrl: {
     type: DataTypes.STRING(500),
     allowNull: true,

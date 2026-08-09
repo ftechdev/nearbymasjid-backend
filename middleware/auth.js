@@ -7,31 +7,32 @@ const protect = async (req, res, next) => {
     try {
       token = req.headers.authorization.split(' ')[1];
 
-      // If token is literally string 'undefined' or empty, reject it early
-      if (!token || token === 'undefined' || token === 'null') {
-        return res.status(401).json({ message: 'Not authorized, invalid token format' });
+      if (!token || token === 'undefined' || token === 'null' || token.trim() === '') {
+        return res.status(401).json({ message: 'Authentication required. Authorization token format is invalid.' });
       }
 
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
       req.user = await User.findByPk(decoded.id, { attributes: { exclude: ['password'] } });
 
-      // User deleted but token still valid
       if (!req.user) {
-        return res.status(401).json({ message: 'Not authorized, account not found' });
+        return res.status(401).json({ message: 'Authentication failed. The account associated with this session no longer exists.' });
       }
 
       return next();
     } catch (error) {
-      // Don't clutter console with jwt malformed errors
-      if (error.name !== 'JsonWebTokenError') {
-        console.error(error);
+      if (error.name === 'TokenExpiredError') {
+        return res.status(401).json({ message: 'Your login session has expired. Please log in again to continue.' });
       }
-      return res.status(401).json({ message: 'Not authorized, token failed' });
+      if (error.name === 'JsonWebTokenError') {
+        return res.status(401).json({ message: 'Invalid authentication token. Please log in again.' });
+      }
+      console.error('[authMiddleware] Unexpected error:', error);
+      return res.status(401).json({ message: 'Authentication failed. Please sign in again.' });
     }
   }
 
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized, no token' });
+    return res.status(401).json({ message: 'Authentication required. No authorization token was provided.' });
   }
 };
 
@@ -39,7 +40,7 @@ const admin = (req, res, next) => {
   if (req.user && req.user.role === 'admin') {
     next();
   } else {
-    res.status(403).json({ message: 'Forbidden: admin access required' });
+    res.status(403).json({ message: 'Access denied: Administrator privileges are required for this request.' });
   }
 };
 

@@ -55,71 +55,88 @@ router.get('/analytics', protect, admin, async (req, res) => {
 
 // 3. SPECIFIC ROUTES FIRST (Crucial for Express)
 router.put('/mosques/:id/approve-timing', protect, admin, async (req, res) => {
-  const mosque = await Mosque.findByPk(req.params.id);
-  if (mosque) {
+  try {
+    const mosque = await Mosque.findByPk(req.params.id);
+    if (!mosque) return res.status(404).json({ message: 'Mosque not found' });
     mosque.timingsApproved = true;
     await mosque.save();
     res.json({ message: 'Timings approved', mosque });
-  } else {
-    res.status(404).json({ message: 'Mosque not found' });
+  } catch (err) {
+    console.error('Approve timing error:', err);
+    res.status(500).json({ message: 'Server Error' });
   }
 });
 
 // Approve a pending photo update — makes it the live photo
 router.put('/mosques/:id/approve-photo', protect, admin, async (req, res) => {
-  const mosque = await Mosque.findByPk(req.params.id);
-  if (!mosque) return res.status(404).json({ message: 'Mosque not found' });
-  if (!mosque.pendingPhotoUrl) return res.status(400).json({ message: 'No pending photo to approve' });
-
-  mosque.photoUrl = mosque.pendingPhotoUrl;
-  mosque.pendingPhotoUrl = null;
-  await mosque.save();
-  res.json({ message: 'Photo approved', mosque });
+  try {
+    const mosque = await Mosque.findByPk(req.params.id);
+    if (!mosque) return res.status(404).json({ message: 'Mosque not found' });
+    if (!mosque.pendingPhotoUrl) return res.status(400).json({ message: 'No pending photo to approve' });
+    mosque.photoUrl = mosque.pendingPhotoUrl;
+    mosque.pendingPhotoUrl = null;
+    await mosque.save();
+    res.json({ message: 'Photo approved', mosque });
+  } catch (err) {
+    console.error('Approve photo error:', err);
+    res.status(500).json({ message: 'Server Error' });
+  }
 });
 
 // Reject a pending photo update — keeps the current live photo unchanged
 router.put('/mosques/:id/reject-photo', protect, admin, async (req, res) => {
-  const mosque = await Mosque.findByPk(req.params.id);
-  if (!mosque) return res.status(404).json({ message: 'Mosque not found' });
-
-  mosque.pendingPhotoUrl = null;
-  await mosque.save();
-  res.json({ message: 'Photo rejected', mosque });
+  try {
+    const mosque = await Mosque.findByPk(req.params.id);
+    if (!mosque) return res.status(404).json({ message: 'Mosque not found' });
+    mosque.pendingPhotoUrl = null;
+    await mosque.save();
+    res.json({ message: 'Photo rejected', mosque });
+  } catch (err) {
+    console.error('Reject photo error:', err);
+    res.status(500).json({ message: 'Server Error' });
+  }
 });
 
 
 // 4. GENERIC ROUTES LAST — Full mosque update by admin
 router.put('/mosques/:id', protect, admin, async (req, res) => {
-  const mosque = await Mosque.findByPk(req.params.id);
-  if (!mosque) return res.status(404).json({ message: 'Mosque not found' });
+  try {
+    const mosque = await Mosque.findByPk(req.params.id);
+    if (!mosque) return res.status(404).json({ message: 'Mosque not found' });
 
-  const { isApproved, name, address, school, photoUrl, iqamahTimings, timingsApproved, lat, lng } = req.body;
+    const { isApproved, name, address, school, photoUrl, iqamahTimings, timingsApproved, lat, lng } = req.body;
 
-  if (isApproved !== undefined) mosque.isApproved = isApproved;
-  if (name !== undefined) mosque.name = name;
-  if (address !== undefined) mosque.address = address;
-  if (school !== undefined) mosque.school = school;
-  if (photoUrl !== undefined) mosque.photoUrl = photoUrl;
-  if (timingsApproved !== undefined) mosque.timingsApproved = timingsApproved;
-  if (lat !== undefined && !isNaN(parseFloat(lat))) mosque.lat = parseFloat(lat);
-  if (lng !== undefined && !isNaN(parseFloat(lng))) mosque.lng = parseFloat(lng);
-  if (iqamahTimings !== undefined) {
-    const raw = typeof iqamahTimings === 'string' ? JSON.parse(iqamahTimings) : iqamahTimings;
-    mosque.iqamahTimings = raw;
+    if (isApproved !== undefined) mosque.isApproved = isApproved;
+    if (name !== undefined) mosque.name = name;
+    if (address !== undefined) mosque.address = address;
+    if (school !== undefined) mosque.school = school;
+    if (photoUrl !== undefined) mosque.photoUrl = photoUrl;
+    if (timingsApproved !== undefined) mosque.timingsApproved = timingsApproved;
+    if (lat !== undefined && !isNaN(parseFloat(lat))) mosque.lat = parseFloat(lat);
+    if (lng !== undefined && !isNaN(parseFloat(lng))) mosque.lng = parseFloat(lng);
+    if (iqamahTimings !== undefined) {
+      const raw = typeof iqamahTimings === 'string' ? JSON.parse(iqamahTimings) : iqamahTimings;
+      mosque.iqamahTimings = raw;
+    }
+
+    await mosque.save();
+    res.json(mosque);
+  } catch (err) {
+    console.error('Admin mosque update error:', err);
+    res.status(500).json({ message: 'Server Error' });
   }
-
-  await mosque.save();
-  res.json(mosque);
 });
 
 
 router.delete('/mosques/:id', protect, admin, async (req, res) => {
-  const mosque = await Mosque.findByPk(req.params.id);
-  if (mosque) {
+  try {
+    const mosque = await Mosque.findByPk(req.params.id);
+    if (!mosque) return res.status(404).json({ message: 'Mosque not found' });
     await mosque.destroy();
     res.json({ message: 'Mosque removed' });
-  } else {
-    res.status(404).json({ message: 'Mosque not found' });
+  } catch (err) {
+    console.error('Admin mosque delete error:', err);
+    res.status(500).json({ message: 'Server Error' });
   }
 });
 

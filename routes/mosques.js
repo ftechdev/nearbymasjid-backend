@@ -3,34 +3,75 @@ const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const Mosque = require('../models/Mosque');
 const { protect } = require('../middleware/auth');
+const { uploadMem } = require('../middleware/upload');
 const { Op } = require('sequelize');
-
 const axios = require('axios');
 
-// Applies to submissions/uploads/updates below — these all require login already,
-// but a compromised or malicious account could otherwise spam submissions or the
-// upload endpoint with no limit at all.
+// ── Rate limiter for write operations ─────────────────────────────────────────
+// Auth is already required, but this caps a compromised/malicious account too.
 const writeLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 30,
   message: { message: 'Too many requests. Please try again in 15 minutes.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
 
-// Get all approved mosques (and nearby places from Google)
+// ── In-memory Google Places cache ──────────────────────────────────────────────
+// Buckets nearby-mosque responses by a coarse grid (~2km cells) so repeated
+// requests for the same area don't hit the Google API on every call.
+// TTL: 5 minutes. No external Redis needed.
+const googleCache = new Map();
+const GOOGLE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+function googleCacheKey(lat, lng, keyword) {
+  // Round to 2 decimal places (~1.1 km grid bucket)
+  return `${parseFloat(lat).toFixed(2)},${parseFloat(lng).toFixed(2)},${keyword || ''}`;
+}
+
+function getFromGoogleCache(key) {
+  const entry = googleCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > GOOGLE_CACHE_TTL_MS) {
+    googleCache.delete(key);
+    return null;
+  }
+  return entry.data;
+}
+
+function setGoogleCache(key, data) {
+  // Prevent unbounded memory growth — evict if over 200 entries
+  if (googleCache.size >= 200) {
+    const oldest = [...googleCache.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
+    if (oldest) googleCache.delete(oldest[0]);
+  }
+  googleCache.set(key, { data, ts: Date.now() });
+}
+
+// ── Whitelist of allowed fields from client-supplied mosqueData ────────────────
+// SECURITY: prevents clients from injecting arbitrary columns (userId, isApproved…)
+function sanitiseMosqueData(raw) {
+  const { name, address, lat, lng, googlePlaceId, school } = raw || {};
+  return { name, address, lat, lng, googlePlaceId, school };
+}
+
+// ── GET /api/mosques ───────────────────────────────────────────────────────────
+// Returns DB mosques (approved) merged with Google Places results.
+// Supports: ?lat=&lng= (nearby), ?keyword= (search), ?page=&limit= (pagination)
 router.get('/', async (req, res) => {
   try {
     const { lat, lng, keyword } = req.query;
+    const page  = Math.max(1, parseInt(req.query.page)  || 1);
+    const limit = Math.min(100, parseInt(req.query.limit) || 50);
+    const offset = (page - 1) * limit;
 
     const where = { isApproved: true };
 
-    // Validate coordinates if provided, and pre-filter to a bounding box around them
-    // so a search doesn't pull every approved mosque in the whole database — the box
-    // is a coarse superset of the real radius; exact distance sort still happens
-    // afterward (in this route's Google merge and again on the client).
+    // Validate coordinates & restrict DB query to a bounding box (20 km radius)
+    let latNum, lngNum;
     if (lat || lng) {
-      const latNum = parseFloat(lat), lngNum = parseFloat(lng);
+      latNum = parseFloat(lat);
+      lngNum = parseFloat(lng);
       if (isNaN(latNum) || isNaN(lngNum) || latNum < -90 || latNum > 90 || lngNum < -180 || lngNum > 180) {
         return res.status(400).json({ message: 'Invalid latitude or longitude' });
       }
@@ -41,39 +82,45 @@ router.get('/', async (req, res) => {
       where.lng = { [Op.between]: [lngNum - lngDelta, lngNum + lngDelta] };
     }
 
-    let mosques = await Mosque.findAll({ where, limit: 200 });
-    // Convert to plain JSON if coming from Sequelize & parse iqamahTimings if stringified
-    mosques = mosques.map(m => {
-      let data = m.toJSON ? m.toJSON() : m;
-      if (typeof data.iqamahTimings === 'string') {
-        try { data.iqamahTimings = JSON.parse(data.iqamahTimings); } catch (e) { }
-      }
-      return data;
-    });
-
-    // Filter DB mosques by keyword (name or address match)
+    // Keyword filter — applied in DB for name/address fields
     if (keyword) {
-      const kw = keyword.toLowerCase();
-      mosques = mosques.filter(m =>
-        m.name?.toLowerCase().includes(kw) ||
-        m.address?.toLowerCase().includes(kw)
-      );
+      where[Op.or] = [
+        { name: { [Op.like]: `%${keyword}%` } },
+        { address: { [Op.like]: `%${keyword}%` } },
+      ];
     }
 
-    if (lat && lng && process.env.GOOGLE_MAPS_API_KEY) {
-      try {
-        const searchKeyword = keyword ? `${keyword} masjid` : 'masjid';
-        const googleRes = await axios.get(`https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=20000&type=mosque&keyword=${encodeURIComponent(searchKeyword)}&key=${process.env.GOOGLE_MAPS_API_KEY}`);
+    const { count, rows } = await Mosque.findAndCountAll({ where, limit, offset, order: [['createdAt', 'DESC']] });
+    let mosques = rows.map(m => m.toJSON());
 
-        if (googleRes.data && googleRes.data.status !== 'OK' && googleRes.data.status !== 'ZERO_RESULTS') {
-          console.error('Google Places API Status:', googleRes.data.status, googleRes.data.error_message || '');
-        }
+    // ── Merge Google Places results ────────────────────────────────────────────
+    if (latNum != null && lngNum != null && process.env.GOOGLE_MAPS_API_KEY) {
+      const cacheKey = googleCacheKey(latNum, lngNum, keyword);
+      let googleMosques = getFromGoogleCache(cacheKey);
 
-        if (googleRes.data && googleRes.data.results) {
-          const googleMosques = googleRes.data.results.map(place => {
-            // Check if this google masjid already has timings in our DB
+      if (!googleMosques) {
+        try {
+          const searchKeyword = keyword ? `${keyword} masjid` : 'masjid';
+          const googleRes = await axios.get(
+            `https://maps.googleapis.com/maps/api/place/nearbysearch/json`,
+            {
+              params: {
+                location: `${latNum},${lngNum}`,
+                radius: 20000,
+                type: 'mosque',
+                keyword: searchKeyword,
+                key: process.env.GOOGLE_MAPS_API_KEY,
+              },
+              timeout: 5000,
+            }
+          );
+
+          if (googleRes.data?.status && googleRes.data.status !== 'OK' && googleRes.data.status !== 'ZERO_RESULTS') {
+            console.error('Google Places API Status:', googleRes.data.status, googleRes.data.error_message || '');
+          }
+
+          googleMosques = (googleRes.data?.results || []).map(place => {
             const localMatch = mosques.find(m => m.googlePlaceId === place.place_id);
-
             return {
               id: place.place_id,
               name: place.name,
@@ -81,32 +128,63 @@ router.get('/', async (req, res) => {
               lat: place.geometry.location.lat,
               lng: place.geometry.location.lng,
               rating: place.rating || 0,
-              photoUrl: place.photos && place.photos.length > 0
-                ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference=${place.photos[0].photo_reference}&key=${process.env.GOOGLE_MAPS_API_KEY}`
+              // SECURITY: photo reference is proxied through our own endpoint —
+              // the Google API key is NEVER sent to the client.
+              photoUrl: place.photos?.length
+                ? `/api/mosques/proxy-photo?ref=${encodeURIComponent(place.photos[0].photo_reference)}`
                 : null,
               iqamahTimings: localMatch ? localMatch.iqamahTimings : null,
               timingsApproved: localMatch ? localMatch.timingsApproved : false,
-              isGoogle: true
+              isGoogle: true,
             };
           });
 
-          // Filter out google results that we are already showing from DB to avoid duplicates
-          const uniqueGoogle = googleMosques.filter(g => !mosques.some(m => m.googlePlaceId === g.id));
-          mosques = [...mosques, ...uniqueGoogle];
+          setGoogleCache(cacheKey, googleMosques);
+        } catch (err) {
+          console.error('Google API Request Failed:', err.message);
+          googleMosques = [];
         }
-      } catch (err) {
-        console.error('Google API Request Failed:', err.message);
       }
+
+      // De-duplicate: skip Google results already in our DB
+      const uniqueGoogle = googleMosques.filter(g => !mosques.some(m => m.googlePlaceId === g.id));
+      mosques = [...mosques, ...uniqueGoogle];
     }
 
-    res.json(mosques);
+    res.json({
+      mosques,
+      total: count,
+      page,
+      totalPages: Math.ceil(count / limit),
+    });
   } catch (err) {
     console.error('[mosques GET] Fatal error:', err.message, err.stack);
     res.status(500).json({ message: 'Server Error' });
   }
 });
 
-// Submit a new mosque
+// ── GET /api/mosques/proxy-photo ───────────────────────────────────────────────
+// Proxies Google Places photo requests so the API key stays server-side only.
+router.get('/proxy-photo', async (req, res) => {
+  try {
+    const { ref } = req.query;
+    if (!ref || !process.env.GOOGLE_MAPS_API_KEY) {
+      return res.status(400).json({ message: 'Invalid photo reference' });
+    }
+
+    const googleUrl = `https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference=${encodeURIComponent(ref)}&key=${process.env.GOOGLE_MAPS_API_KEY}`;
+    const response = await axios.get(googleUrl, { responseType: 'stream', timeout: 8000 });
+
+    res.set('Content-Type', response.headers['content-type'] || 'image/jpeg');
+    res.set('Cache-Control', 'public, max-age=86400'); // Cache photos for 24h on client
+    response.data.pipe(res);
+  } catch (err) {
+    console.error('Photo proxy error:', err.message);
+    res.status(502).json({ message: 'Could not fetch photo' });
+  }
+});
+
+// ── POST /api/mosques — Submit a new mosque ───────────────────────────────────
 router.post('/', protect, writeLimiter, async (req, res) => {
   try {
     const { name, address, location, school, iqamahTimings, photoUrl } = req.body;
@@ -114,10 +192,8 @@ router.post('/', protect, writeLimiter, async (req, res) => {
       return res.status(400).json({ message: 'Name, address and location are required' });
     }
 
-    // Check for existing mosques at the same location (proximity check ~100m).
-    // Bounded to a small box around the submitted point instead of loading
-    // every mosque row, so this doesn't get slower as the table grows.
-    const threshold = 0.0009; // Approx 100 meters in degrees
+    // Proximity check (~100 m) — bounded box so it stays fast as table grows
+    const threshold = 0.0009;
     const nearbyMosques = await Mosque.findAll({
       where: {
         lat: { [Op.between]: [location.lat - threshold, location.lat + threshold] },
@@ -130,17 +206,16 @@ router.post('/', protect, writeLimiter, async (req, res) => {
     );
 
     if (duplicate) {
-      duplicate.name = name;
+      // Update name/address/school on the existing record but leave isApproved unchanged
+      // and mark timings as pending — admin review still required
+      duplicate.name    = name;
       duplicate.address = address;
-      duplicate.school = school === 'hanafi' ? 'hanafi' : 'shafi';
+      duplicate.school  = school === 'hanafi' ? 'hanafi' : 'shafi';
       if (iqamahTimings) {
-        duplicate.iqamahTimings = typeof iqamahTimings === 'string' ? JSON.parse(iqamahTimings) : iqamahTimings;
+        duplicate.iqamahTimings   = typeof iqamahTimings === 'string' ? JSON.parse(iqamahTimings) : iqamahTimings;
         duplicate.timingsApproved = false;
         duplicate.timingsSubmittedBy = {
-          id: req.user.id,
-          name: req.user.name,
-          email: req.user.email,
-          submittedAt: new Date().toISOString(),
+          id: req.user.id, name: req.user.name, email: req.user.email, submittedAt: new Date().toISOString(),
         };
       }
       if (photoUrl) {
@@ -149,43 +224,27 @@ router.post('/', protect, writeLimiter, async (req, res) => {
       await duplicate.save();
       return res.status(200).json({
         message: 'Already added masjid has been updated with the new details and timings.',
-        mosque: duplicate
+        mosque: duplicate,
       });
     }
 
     const createdMosque = await Mosque.create({
-      name, address, lat: location.lat, lng: location.lng, userId: req.user.id, isApproved: false,
+      name, address, lat: location.lat, lng: location.lng,
+      userId: req.user.id,
+      isApproved: false,   // All new submissions need admin approval
       school: school === 'hanafi' ? 'hanafi' : 'shafi',
       iqamahTimings,
       photoUrl,
-      timingsApproved: false
+      timingsApproved: false,
     });
     res.status(201).json(createdMosque);
   } catch (err) {
-    console.error(err);
+    console.error('Mosque submit error:', err);
     res.status(500).json({ message: 'Failed to submit mosque' });
   }
 });
 
-// Photo upload route (Smart: Hostinger primary, Cloudinary fallback)
-const multer = require('multer');
-const memoryStorage = multer.memoryStorage();
-const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
-
-const uploadMem = multer({
-  storage: memoryStorage,
-  limits: { fileSize: MAX_FILE_SIZE },
-  fileFilter: (req, file, cb) => {
-    if (ALLOWED_MIME_TYPES.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only JPEG, PNG, WebP, and GIF images are allowed'));
-    }
-  },
-});
-const { smartUpload } = require('../utils/uploadHandler');
-
+// ── POST /api/mosques/upload-photo ────────────────────────────────────────────
 router.post('/upload-photo', protect, writeLimiter, (req, res, next) => {
   uploadMem.single('photo')(req, res, (err) => {
     if (err) {
@@ -195,7 +254,9 @@ router.post('/upload-photo', protect, writeLimiter, (req, res, next) => {
       }
       return res.status(400).json({ message: err.message || 'Upload error' });
     }
-    console.log('[upload-photo] Multer OK. File:', req.file ? `${req.file.originalname} (${req.file.mimetype}, ${req.file.size} bytes)` : 'NONE');
+    console.log('[upload-photo] Multer OK. File:', req.file
+      ? `${req.file.originalname} (${req.file.mimetype}, ${req.file.size} bytes)`
+      : 'NONE');
     next();
   });
 }, async (req, res) => {
@@ -204,44 +265,36 @@ router.post('/upload-photo', protect, writeLimiter, (req, res, next) => {
       console.error('[upload-photo] No file in request. Content-Type:', req.headers['content-type']);
       return res.status(400).json({ message: 'No file uploaded' });
     }
-
+    const { smartUpload } = require('../utils/uploadHandler');
     const photoUrl = await smartUpload(req.file);
     console.log('[upload-photo] Success. URL:', photoUrl);
     res.json({ photoUrl });
   } catch (err) {
-    console.error("Smart Upload Error:", err.message);
-    res.status(500).json({ message: 'Upload failed. Please try again.' });
+    console.error('Smart Upload Error:', err.message);
+    res.status(500).json({ message: `Upload failed: ${err.message}` });
   }
 });
 
-// Update mosque timings
+// ── PUT /api/mosques/:id/timings — Update mosque timings ─────────────────────
 router.put('/:id/timings', protect, writeLimiter, async (req, res) => {
   try {
     const { iqamahTimings, mosqueData } = req.body;
     let mosque = null;
 
-    // Try finding by internal PK (UUID)
-    try {
-      mosque = await Mosque.findByPk(req.params.id);
-    } catch { }
+    try { mosque = await Mosque.findByPk(req.params.id); } catch { }
+    if (!mosque) mosque = await Mosque.findOne({ where: { googlePlaceId: req.params.id } });
 
-    // If still not found, try finding by googlePlaceId
-    if (!mosque) {
-      mosque = await Mosque.findOne({ where: { googlePlaceId: req.params.id } });
-    }
-
-    // If NOT found and mosqueData is provided, create it as a new DB record
+    // If Google-sourced mosque not yet in DB and caller supplied mosqueData, create it.
+    // SECURITY: whitelist fields — never spread raw client data directly.
     if (!mosque && mosqueData) {
       mosque = await Mosque.create({
-        ...mosqueData,
+        ...sanitiseMosqueData(mosqueData),
         userId: req.user.id,
-        isApproved: true
+        isApproved: false, // New mosques always start as pending
       });
     }
 
-    if (!mosque) {
-      return res.status(404).json({ message: 'Mosque not found' });
-    }
+    if (!mosque) return res.status(404).json({ message: 'Mosque not found' });
 
     if (!iqamahTimings || Object.keys(iqamahTimings).length === 0) {
       return res.status(400).json({ message: 'Please provide at least one prayer time' });
@@ -253,112 +306,86 @@ router.put('/:id/timings', protect, writeLimiter, async (req, res) => {
     if (Object.keys(incoming).length === 0) {
       return res.status(400).json({ message: 'Please provide at least one prayer time' });
     }
+
     const existing = mosque.iqamahTimings || {};
-    mosque.iqamahTimings = { ...existing, ...incoming };
-    mosque.timingsApproved = true; // Crowdsourced timings go live immediately, no admin review needed
+    mosque.iqamahTimings   = { ...existing, ...incoming };
+    mosque.timingsApproved = true; // Crowdsourced timings go live immediately
     mosque.timingsSubmittedBy = {
-      id: req.user.id,
-      name: req.user.name,
-      email: req.user.email,
-      submittedAt: new Date().toISOString(),
+      id: req.user.id, name: req.user.name, email: req.user.email, submittedAt: new Date().toISOString(),
     };
     await mosque.save();
 
     res.json({ message: 'Timings updated successfully', iqamahTimings: mosque.iqamahTimings });
   } catch (err) {
-    console.error(err);
+    console.error('Timings update error:', err);
     res.status(500).json({ message: 'Server Error' });
   }
 });
 
-// Submit an updated mosque photo (any logged-in user, same crowdsourced model as
-// timings). Unlike timings, a photo replacement stays pending until an admin approves
-// it — the live photoUrl is untouched until then, so a bad/wrong photo can't go public.
+// ── PUT /api/mosques/:id/photo — Submit an updated mosque photo ───────────────
+// Photo stays pending until an admin approves it; live photoUrl is untouched.
 router.put('/:id/photo', protect, writeLimiter, async (req, res) => {
   try {
     const { photoUrl, mosqueData } = req.body;
-    if (!photoUrl) {
-      return res.status(400).json({ message: 'photoUrl is required' });
-    }
+    if (!photoUrl) return res.status(400).json({ message: 'photoUrl is required' });
 
     let mosque = null;
-    try {
-      mosque = await Mosque.findByPk(req.params.id);
-    } catch { }
+    try { mosque = await Mosque.findByPk(req.params.id); } catch { }
+    if (!mosque) mosque = await Mosque.findOne({ where: { googlePlaceId: req.params.id } });
 
-    if (!mosque) {
-      mosque = await Mosque.findOne({ where: { googlePlaceId: req.params.id } });
-    }
-
-    // If NOT found and mosqueData is provided (Google-sourced mosque not yet in our DB), create it.
-    // This is the very first photo for a brand-new record, so it can go live immediately.
+    // First-ever photo for a Google-sourced mosque not yet in our DB — goes live immediately.
+    // SECURITY: whitelist fields.
     if (!mosque && mosqueData) {
       mosque = await Mosque.create({
-        ...mosqueData,
+        ...sanitiseMosqueData(mosqueData),
         photoUrl,
         userId: req.user.id,
-        isApproved: true
+        isApproved: true,
       });
       return res.json({ message: 'Photo added successfully', photoUrl: mosque.photoUrl, pending: false });
     }
 
-    if (!mosque) {
-      return res.status(404).json({ message: 'Mosque not found' });
-    }
+    if (!mosque) return res.status(404).json({ message: 'Mosque not found' });
 
     mosque.pendingPhotoUrl = photoUrl;
     mosque.photoSubmittedBy = {
-      id: req.user.id,
-      name: req.user.name,
-      email: req.user.email,
-      submittedAt: new Date().toISOString(),
+      id: req.user.id, name: req.user.name, email: req.user.email, submittedAt: new Date().toISOString(),
     };
     await mosque.save();
 
     res.json({ message: 'Photo submitted for admin review', pendingPhotoUrl: mosque.pendingPhotoUrl, pending: true });
   } catch (err) {
-    console.error(err);
+    console.error('Photo update error:', err);
     res.status(500).json({ message: 'Server Error' });
   }
 });
 
-// Get mosques added by the current user
+// ── GET /api/mosques/my-mosques — Mosques added by current user ───────────────
 router.get('/my-mosques', protect, async (req, res) => {
   try {
     const mosques = await Mosque.findAll({
       where: { userId: req.user.id },
-      order: [['createdAt', 'DESC']]
+      order: [['createdAt', 'DESC']],
     });
     res.json(mosques);
   } catch (err) {
+    console.error('My mosques error:', err);
     res.status(500).json({ message: 'Server Error' });
   }
 });
 
-// Get the latest data for a single mosque, by internal ID or Google Place ID.
-// Registered last (after every other specific GET route) so it doesn't shadow them —
-// Express matches ':id' against any single path segment. Used to refresh a user's
-// selected "my masjid" with current timings/photo instead of a stale cached snapshot.
+// ── GET /api/mosques/:id — Single mosque by internal ID or Google Place ID ────
+// Registered last so it doesn't shadow any more-specific GET routes above.
 router.get('/:id', async (req, res) => {
   try {
     let mosque = null;
-    try {
-      mosque = await Mosque.findByPk(req.params.id);
-    } catch { }
-    if (!mosque) {
-      mosque = await Mosque.findOne({ where: { googlePlaceId: req.params.id } });
-    }
-    if (!mosque) {
-      return res.status(404).json({ message: 'Mosque not found' });
-    }
+    try { mosque = await Mosque.findByPk(req.params.id); } catch { }
+    if (!mosque) mosque = await Mosque.findOne({ where: { googlePlaceId: req.params.id } });
+    if (!mosque) return res.status(404).json({ message: 'Mosque not found' });
 
-    const data = mosque.toJSON();
-    if (typeof data.iqamahTimings === 'string') {
-      try { data.iqamahTimings = JSON.parse(data.iqamahTimings); } catch { }
-    }
-    res.json(data);
+    res.json(mosque.toJSON()); // iqamahTimings getter already returns parsed JSON
   } catch (err) {
-    console.error(err);
+    console.error('Single mosque fetch error:', err);
     res.status(500).json({ message: 'Server Error' });
   }
 });

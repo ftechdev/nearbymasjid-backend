@@ -56,7 +56,11 @@ app.use(cors({
   credentials: true,
 }));
 
-app.use(express.json());
+// Default body-parser limit is 100 kb — raise it to 2 mb so that clients
+// sending moderately-sized JSON payloads (e.g. base64 thumbnails, bulk data)
+// don't hit a PayloadTooLargeError. Actual file uploads go through multer
+// and are not affected by this limit.
+app.use(express.json({ limit: '2mb' }));
 
 // Ensure uploads directory exists before serving it
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -92,25 +96,7 @@ app.post('/api/notifications/register-token', (req, res) => {
 app.post('/api/notifications/dissociate-token', (req, res) => {
   res.json({ status: 'ok', message: 'Notification push token dissociated successfully' });
 });
-// ── TEMPORARY one-time file seed endpoint ──────────────────────────────────
-// Lets us upload existing local image files to the hosted server's /uploads/
-// folder without needing FTP. Secured by ADMIN_SEED_SECRET env var.
-// REMOVE this endpoint once seeding is complete.
-const multerSeed = require('multer');
-const seedUpload = multerSeed({ storage: multerSeed.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
-app.post('/api/admin/seed-file', seedUpload.single('file'), async (req, res) => {
-  const secret = req.headers['x-seed-secret'];
-  if (!process.env.ADMIN_SEED_SECRET || secret !== process.env.ADMIN_SEED_SECRET) {
-    return res.status(403).json({ message: 'Forbidden' });
-  }
-  if (!req.file || !req.query.filename) {
-    return res.status(400).json({ message: 'file and filename query param required' });
-  }
-  const filename = path.basename(req.query.filename); // prevent path traversal
-  const dest = path.join(uploadsDir, filename);
-  await fs.promises.writeFile(dest, req.file.buffer);
-  res.json({ message: 'File saved', url: `/uploads/${filename}` });
-});
+
 
 
 // Basic health check
