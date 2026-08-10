@@ -116,6 +116,8 @@ router.put('/mosques/:id', protect, admin, async (req, res) => {
     if (lng !== undefined && !isNaN(parseFloat(lng))) mosque.lng = parseFloat(lng);
     if (iqamahTimings !== undefined) {
       const raw = typeof iqamahTimings === 'string' ? JSON.parse(iqamahTimings) : iqamahTimings;
+      // Maghrib is always location-based sunset — never store it as a fixed iqamah time
+      delete raw.maghrib;
       mosque.iqamahTimings = raw;
     }
 
@@ -268,7 +270,9 @@ router.get('/settings/default-timings', protect, admin, async (req, res) => {
 
     if (timings && typeof timings === 'object' && timings.fajr) {
       console.log('Returning valid global defaults from DB');
-      res.json(timings);
+      // Maghrib is always derived from location-based sunset — never a fixed stored value
+      const { maghrib: _m, ...timingsWithoutMaghrib } = timings;
+      res.json(timingsWithoutMaghrib);
     } else {
       console.log('Returning fallback values (no valid record in DB)');
       res.json({
@@ -276,7 +280,7 @@ router.get('/settings/default-timings', protect, admin, async (req, res) => {
         sunrise: '06:30',
         dhuhr: '13:30',
         asr: '17:00',
-        maghrib: '19:00',
+        // maghrib intentionally omitted — always equals location sunset
         isha: '20:30',
         jumma: '13:30'
       });
@@ -302,6 +306,10 @@ router.post('/settings/default-timings', protect, admin, async (req, res) => {
       return res.status(400).json({ message: 'Timings must be an object' });
     }
 
+    // Maghrib is always equal to location-based sunset — never stored as a fixed value
+    delete timings.maghrib;
+    console.log('Maghrib stripped from default timings (always equals location sunset).');
+
     let setting = await Settings.findOne({ where: { key: 'default_timings' } });
     
     if (setting) {
@@ -315,7 +323,9 @@ router.post('/settings/default-timings', protect, admin, async (req, res) => {
     }
     
     console.log('Save successful.');
-    res.json({ message: 'Default timings updated', timings: setting.value });
+    // Return without maghrib so frontend knows it's not stored
+    const { maghrib: _m, ...returnTimings } = setting.value || timings;
+    res.json({ message: 'Default timings updated', timings: returnTimings });
   } catch (err) {
     console.error('POST default timings error:', err);
     res.status(500).json({ message: 'Server Error' });
@@ -335,16 +345,19 @@ router.post('/mosques/:id/apply-default-timings', protect, admin, async (req, re
         fajr: '05:30',
         dhuhr: '13:30',
         asr: '17:00',
-        maghrib: '19:00',
+        // maghrib intentionally omitted — always equals location-based sunset
         isha: '20:30',
         jumma: '13:30'
       };
     }
 
+    // Maghrib is always location-based sunset — never stored as fixed iqamah timing
+    const { maghrib: _m, ...timingsWithoutMaghrib } = (defaultTimings || {});
+
     const mosque = await Mosque.findByPk(req.params.id);
     if (!mosque) return res.status(404).json({ message: 'Mosque not found' });
 
-    mosque.iqamahTimings = defaultTimings;
+    mosque.iqamahTimings = timingsWithoutMaghrib;
     mosque.timingsApproved = true; 
     mosque.timingsSubmittedBy = {
       id: req.user.id,

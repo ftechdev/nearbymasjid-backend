@@ -15,16 +15,19 @@ router.get('/default-timings', async (req, res) => {
          data = null;
       }
 
-      if (data) return res.json(data);
+      if (data) {
+        // Maghrib is always location-based sunset — never a fixed stored default
+        const { maghrib: _m, ...dataWithoutMaghrib } = (typeof data === 'object' ? data : {});
+        return res.json(Object.keys(dataWithoutMaghrib).length ? dataWithoutMaghrib : null || (() => { throw new Error('empty'); })());
+      }
     }
 
-    // Standard Fallback
+    // Standard Fallback (maghrib intentionally omitted — always equals location sunset)
     res.json({
       fajr: '05:30',
       sunrise: '06:30',
       dhuhr: '13:30',
       asr: '17:00',
-      maghrib: '19:00',
       isha: '20:30',
       jumma: '13:30'
     });
