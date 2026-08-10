@@ -8,6 +8,31 @@ const { Op } = require('sequelize');
 
 router.get('/health', (req, res) => res.send('Admin API Healthy'));
 
+// ONE-TIME MIGRATION — strip stored maghrib from all mosque iqamahTimings
+// GET /api/admin/migrate/strip-maghrib  (requires admin login)
+router.get('/migrate/strip-maghrib', protect, admin, async (req, res) => {
+  try {
+    const allMosques = await Mosque.findAll();
+    const results = [];
+    for (const mosque of allMosques) {
+      const t = mosque.iqamahTimings;
+      if (t && typeof t === 'object' && t.maghrib) {
+        const { maghrib, ...rest } = t;
+        mosque.iqamahTimings = rest;
+        mosque.changed('iqamahTimings', true);
+        await mosque.save();
+        results.push({ name: mosque.name, removed: maghrib });
+      }
+    }
+    res.json({
+      message: `Done. Stripped maghrib from ${results.length} of ${allMosques.length} mosque(s).`,
+      updated: results
+    });
+  } catch (err) {
+    res.status(500).json({ message: 'Migration failed', error: err.message });
+  }
+});
+
 // 1. Get all mosques (approved or pending) with pagination
 router.get('/mosques', protect, admin, async (req, res) => {
   try {
@@ -22,16 +47,16 @@ router.get('/mosques', protect, admin, async (req, res) => {
       offset,
     });
     let mosques = rows;
-    
+
     // Ensure JSON is parsed properly for all mosques
     mosques = mosques.map(m => {
       let mosque = m.toJSON();
       if (typeof mosque.iqamahTimings === 'string') {
-        try { mosque.iqamahTimings = JSON.parse(mosque.iqamahTimings); } catch(e) {}
+        try { mosque.iqamahTimings = JSON.parse(mosque.iqamahTimings); } catch (e) { }
       }
       return mosque;
     });
-    
+
     res.json({ mosques, total: count, page, totalPages: Math.ceil(count / limit) });
   } catch (err) {
     console.error('Admin Mosques Error:', err);
@@ -253,13 +278,13 @@ router.get('/settings/default-timings', protect, admin, async (req, res) => {
   try {
     console.log('GET /settings/default-timings requested by:', req.user.email);
     const setting = await Settings.findOne({ where: { key: 'default_timings' } });
-    
+
     let timings = null;
     if (setting) {
       timings = setting.value;
       // Handle cases where data might be a string in the DB or corrupted as an indexed object
       if (typeof timings === 'string') {
-        try { timings = JSON.parse(timings); } catch(e) { timings = null; }
+        try { timings = JSON.parse(timings); } catch (e) { timings = null; }
       }
       // Detect corruption (like {"0": "{", "1": "\"" ...})
       if (timings && typeof timings === 'object' && timings['0'] !== undefined) {
@@ -296,10 +321,10 @@ router.post('/settings/default-timings', protect, admin, async (req, res) => {
   try {
     let { timings } = req.body;
     console.log('POST /settings/default-timings - Received:', typeof timings, JSON.stringify(timings));
-    
+
     // Ensure timings is a proper object
     if (typeof timings === 'string') {
-      try { timings = JSON.parse(timings); } catch(e) { return res.status(400).json({ message: 'Invalid JSON string' }); }
+      try { timings = JSON.parse(timings); } catch (e) { return res.status(400).json({ message: 'Invalid JSON string' }); }
     }
 
     if (!timings || typeof timings !== 'object' || Array.isArray(timings)) {
@@ -311,17 +336,17 @@ router.post('/settings/default-timings', protect, admin, async (req, res) => {
     console.log('Maghrib stripped from default timings (always equals location sunset).');
 
     let setting = await Settings.findOne({ where: { key: 'default_timings' } });
-    
+
     if (setting) {
       console.log('Updating existing settings record...');
       setting.value = timings;
-      setting.changed('value', true); 
+      setting.changed('value', true);
       await setting.save();
     } else {
       console.log('Creating new settings record...');
       setting = await Settings.create({ key: 'default_timings', value: timings });
     }
-    
+
     console.log('Save successful.');
     // Return without maghrib so frontend knows it's not stored
     const { maghrib: _m, ...returnTimings } = setting.value || timings;
@@ -337,7 +362,7 @@ router.post('/mosques/:id/apply-default-timings', protect, admin, async (req, re
   try {
     let defaultTimings;
     const setting = await Settings.findOne({ where: { key: 'default_timings' } });
-    
+
     if (setting) {
       defaultTimings = setting.value;
     } else {
@@ -358,7 +383,7 @@ router.post('/mosques/:id/apply-default-timings', protect, admin, async (req, re
     if (!mosque) return res.status(404).json({ message: 'Mosque not found' });
 
     mosque.iqamahTimings = timingsWithoutMaghrib;
-    mosque.timingsApproved = true; 
+    mosque.timingsApproved = true;
     mosque.timingsSubmittedBy = {
       id: req.user.id,
       name: 'System (Admin Default)',

@@ -1,19 +1,8 @@
 /**
  * ONE-TIME MIGRATION SCRIPT
- * ─────────────────────────────────────────────────────────────────────────────
  * Strips the stored 'maghrib' key from every mosque's iqamahTimings in the DB.
- *
- * WHY:
- *   Maghrib must always equal the location's exact sunset time (from Aladhan
- *   API). If a fixed maghrib value is stored in iqamahTimings, the old app
- *   version will show that fixed value instead of the live sunset.
- *   Removing it from the DB means even old app users will get the correct
- *   live sunset-based Maghrib time (because the app falls back to the
- *   Aladhan API value when no iqamah is stored).
- *
- * RUN ONCE after deploying the new backend:
+ * Run once after deploying the new backend:
  *   node scripts/stripMaghribFromDB.js
- * ─────────────────────────────────────────────────────────────────────────────
  */
 
 require('dotenv').config();
@@ -25,38 +14,39 @@ const Mosque = require('../models/Mosque');
     await sequelize.authenticate();
     console.log('✅ DB connected.\n');
 
-    // Fetch all mosques that have iqamahTimings stored
-    const mosques = await Mosque.findAll({
-      where: { iqamahTimings: { [require('sequelize').Op.ne]: null } }
+    // Fetch ALL mosques — filter in JS to avoid Sequelize Op import issues
+    const allMosques = await Mosque.findAll();
+    const mosques = allMosques.filter(m => {
+      const t = m.iqamahTimings;
+      return t && typeof t === 'object' && t.maghrib;
     });
 
-    console.log(`🕌 Found ${mosques.length} mosques with iqamahTimings.`);
-    let updated = 0;
+    console.log(`🕌 Total mosques: ${allMosques.length}`);
+    console.log(`🕌 Mosques with stored maghrib: ${mosques.length}`);
 
+    if (mosques.length === 0) {
+      console.log('\n✅ Nothing to do — no mosque has a stored maghrib value.');
+      return;
+    }
+
+    let updated = 0;
     for (const mosque of mosques) {
       const timings = mosque.iqamahTimings;
-
-      // Skip if no timings or already no maghrib key
-      if (!timings || typeof timings !== 'object' || !timings.maghrib) continue;
-
-      // Remove maghrib key
       const { maghrib, ...rest } = timings;
       mosque.iqamahTimings = rest;
       mosque.changed('iqamahTimings', true);
       await mosque.save();
-
-      console.log(`  ✔ [${mosque.name}] removed maghrib: "${maghrib}"`);
+      console.log(`  ✔ [${mosque.name}] removed stored maghrib: "${maghrib}"`);
       updated++;
     }
 
     console.log(`\n✅ Done. Stripped maghrib from ${updated} mosque(s).`);
-    if (updated === 0) {
-      console.log('   (No mosques had a stored maghrib — nothing to do.)');
-    }
   } catch (err) {
-    console.error('❌ Error:', err.message);
+    console.error('❌ Error details:');
+    console.error(err);
   } finally {
-    await sequelize.close();
+    try { await sequelize.close(); } catch {}
     process.exit(0);
   }
 })();
+
