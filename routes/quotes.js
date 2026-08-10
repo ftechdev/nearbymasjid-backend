@@ -22,9 +22,9 @@ router.get('/daily', async (req, res) => {
         // 2. Pick the least-recently-shown (nulls first = never shown)
         quote = await Quote.findOne({
           where: { lastShownDate: { [Op.or]: [null, { [Op.ne]: today }] } },
-          order: [['lastShownDate', 'ASC NULLS FIRST']],
+          order: [['lastShownDate', 'ASC']], // MySQL puts NULLs first in ASC by default
           transaction: t,
-          lock: t.LOCK.UPDATE, // row-level lock to prevent duplicate selection
+          lock: t.LOCK.UPDATE,
         });
 
         if (!quote) return null;
