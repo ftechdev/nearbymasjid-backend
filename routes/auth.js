@@ -82,19 +82,19 @@ router.post('/login', authLimiter, async (req, res) => {
     // The real reason is logged server-side for debugging.
     if (!user) {
       console.warn(`[login] Failed — no account found for email: ${email}`);
-      return res.status(401).json({ message: 'Incorrect email or password. Please check your details and try again.' });
+      return res.status(404).json({ message: 'No account found with this email address. Please check your email or sign up.' });
     }
 
     if (!user.password) {
       // This account was created via Google OAuth — it has no password
       console.warn(`[login] Failed — account ${email} was registered with Google and has no password.`);
-      return res.status(401).json({ message: 'This account was created with Google Sign-In. Please use "Continue with Google" to log in.' });
+      return res.status(401).json({ message: 'This account was created with Google Sign-In. Please tap "Continue with Google" to log in.' });
     }
 
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
       console.warn(`[login] Failed — wrong password for email: ${email}`);
-      return res.status(401).json({ message: 'Incorrect email or password. Please check your details and try again.' });
+      return res.status(401).json({ message: 'Incorrect password. Please double-check your password or use "Forgot Password".' });
     }
 
     res.json({
