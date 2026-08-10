@@ -11,14 +11,14 @@ router.get('/default-timings', async (req, res) => {
 
       // Handle corrupted indexed object strings
       if (data && typeof data === 'object' && data['0'] !== undefined && data['1'] !== undefined) {
-         console.log('Public API detected corrupted settings in DB, ignoring.');
-         data = null;
+        console.log('Public API detected corrupted settings in DB, ignoring.');
+        data = null;
       }
 
-      if (data) {
-        // Maghrib is always location-based sunset — never a fixed stored default
-        const { maghrib: _m, ...dataWithoutMaghrib } = (typeof data === 'object' ? data : {});
-        return res.json(Object.keys(dataWithoutMaghrib).length ? dataWithoutMaghrib : null || (() => { throw new Error('empty'); })());
+      if (data && typeof data === 'object' && data.fajr) {
+        // Maghrib is always location-based sunset — strip it before returning
+        const { maghrib: _m, ...dataWithoutMaghrib } = data;
+        return res.json(dataWithoutMaghrib);
       }
     }
 
