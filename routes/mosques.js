@@ -6,46 +6,29 @@ const { protect } = require('../middleware/auth');
 const { uploadMem } = require('../middleware/upload');
 const { Op } = require('sequelize');
 const axios = require('axios');
+const { cacheGet, cacheSet } = require('../config/redis');
 
 // ── Rate limiter for write operations ─────────────────────────────────────────
 // Auth is already required, but this caps a compromised/malicious account too.
 const writeLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 30,
+  // See authLimiter in routes/auth.js for why this is relaxed under the test suite only.
+  max: process.env.NODE_ENV === 'test' ? 1000 : 30,
   message: { message: 'Too many requests. Please try again in 15 minutes.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
 
-// ── In-memory Google Places cache ──────────────────────────────────────────────
-// Buckets nearby-mosque responses by a coarse grid (~2km cells) so repeated
+// ── Google Places cache (Redis) ─────────────────────────────────────────────────
+// Buckets nearby-mosque responses by a coarse grid (~1.1km cells) so repeated
 // requests for the same area don't hit the Google API on every call.
-// TTL: 5 minutes. No external Redis needed.
-const googleCache = new Map();
-const GOOGLE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+// TTL: 5 minutes. Falls back to always-miss (no error) if Redis isn't configured
+// or is unreachable — see config/redis.js.
+const GOOGLE_CACHE_TTL_SECONDS = 5 * 60;
 
 function googleCacheKey(lat, lng, keyword) {
   // Round to 2 decimal places (~1.1 km grid bucket)
-  return `${parseFloat(lat).toFixed(2)},${parseFloat(lng).toFixed(2)},${keyword || ''}`;
-}
-
-function getFromGoogleCache(key) {
-  const entry = googleCache.get(key);
-  if (!entry) return null;
-  if (Date.now() - entry.ts > GOOGLE_CACHE_TTL_MS) {
-    googleCache.delete(key);
-    return null;
-  }
-  return entry.data;
-}
-
-function setGoogleCache(key, data) {
-  // Prevent unbounded memory growth — evict if over 200 entries
-  if (googleCache.size >= 200) {
-    const oldest = [...googleCache.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
-    if (oldest) googleCache.delete(oldest[0]);
-  }
-  googleCache.set(key, { data, ts: Date.now() });
+  return `google:${parseFloat(lat).toFixed(2)},${parseFloat(lng).toFixed(2)},${keyword || ''}`;
 }
 
 // ── Whitelist of allowed fields from client-supplied mosqueData ────────────────
@@ -96,7 +79,7 @@ router.get('/', async (req, res) => {
     // ── Merge Google Places results ────────────────────────────────────────────
     if (latNum != null && lngNum != null && process.env.GOOGLE_MAPS_API_KEY) {
       const cacheKey = googleCacheKey(latNum, lngNum, keyword);
-      let googleMosques = getFromGoogleCache(cacheKey);
+      let googleMosques = await cacheGet(cacheKey);
 
       if (!googleMosques) {
         try {
@@ -139,8 +122,9 @@ router.get('/', async (req, res) => {
             };
           });
 
-          setGoogleCache(cacheKey, googleMosques);
+          await cacheSet(cacheKey, googleMosques, GOOGLE_CACHE_TTL_SECONDS);
         } catch (err) {
+          
           console.error('Google API Request Failed:', err.message);
           googleMosques = [];
         }
@@ -302,15 +286,25 @@ router.put('/:id/timings', protect, writeLimiter, async (req, res) => {
       return res.status(400).json({ message: 'Please provide at least one prayer time' });
     }
 
+    // A mosque's first-ever timing submission (or one from someone other than
+    // whoever's timing was last approved) needs admin review. Once a specific
+    // user's submission has been approved, THAT SAME user's later updates to
+    // this same mosque go live immediately — anyone else still needs review.
+    const isTrustedSubmitter = mosque.timingsApproved && mosque.timingsSubmittedBy?.id === req.user.id;
+
     const existing = mosque.iqamahTimings || {};
     mosque.iqamahTimings   = { ...existing, ...incoming };
-    mosque.timingsApproved = true; // Crowdsourced timings go live immediately
+    mosque.timingsApproved = isTrustedSubmitter;
     mosque.timingsSubmittedBy = {
       id: req.user.id, name: req.user.name, email: req.user.email, submittedAt: new Date().toISOString(),
     };
     await mosque.save();
 
-    res.json({ message: 'Timings updated successfully', iqamahTimings: mosque.iqamahTimings });
+    res.json({
+      message: isTrustedSubmitter ? 'Timings updated successfully' : 'Timings submitted for admin review',
+      iqamahTimings: mosque.iqamahTimings,
+      timingsApproved: mosque.timingsApproved,
+    });
   } catch (err) {
     console.error('Timings update error:', err);
     res.status(500).json({ message: 'Server Error' });

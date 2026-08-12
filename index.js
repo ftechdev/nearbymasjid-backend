@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 const fs = require('fs');
 const { connectDB } = require('./config/db');
+require('./config/redis'); // connects (or logs that caching is disabled) as soon as the process boots
 
 // Without a handler, Node already exits on these — but silently, with no log.
 // Log first, then exit the same way so the host's restart is explained in logs.
@@ -65,7 +66,8 @@ app.use(express.json({ limit: '2mb' }));
 // Ensure uploads directory exists before serving it
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-app.use('/uploads', express.static(uploadsDir));
+// Uploaded photos are immutable (re-uploads get a new filename) — cache long, client-revalidates via ETag
+app.use('/uploads', express.static(uploadsDir, { maxAge: '7d', etag: true }));
 
 // Baseline protection for every /api route — auth.js and mosques.js already
 // layer tighter limiters (authLimiter, writeLimiter) on their sensitive
@@ -73,7 +75,8 @@ app.use('/uploads', express.static(uploadsDir));
 // settings.js, and the public GET /api/mosques) is left completely open.
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 300,
+  // See authLimiter in routes/auth.js for why this is relaxed under the test suite only.
+  max: process.env.NODE_ENV === 'test' ? 5000 : 300,
   message: { message: 'Too many requests. Please try again shortly.' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -268,16 +271,23 @@ app.use((err, req, res, next) => {
   res.status(status).json({ message });
 });
 
-const PORT = process.env.PORT || 5000;
+// Only bind a real port when this file is run directly (`node index.js` /
+// `npm start` / `npm run dev`) — not when a test file does `require('./index.js')`
+// to drive `app` in-memory via supertest.
+if (require.main === module) {
+  const PORT = process.env.PORT || 5000;
 
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT} at http://0.0.0.0:${PORT}`);
-});
-
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received — closing server gracefully...');
-  server.close(() => {
-    console.log('Server closed.');
-    process.exit(0);
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on port ${PORT} at http://0.0.0.0:${PORT}`);
   });
-});
+
+  process.on('SIGTERM', () => {
+    console.log('SIGTERM received — closing server gracefully...');
+    server.close(() => {
+      console.log('Server closed.');
+      process.exit(0);
+    });
+  });
+}
+
+module.exports = app;

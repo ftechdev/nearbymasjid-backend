@@ -2,9 +2,15 @@ const express = require('express');
 const router = express.Router();
 const Mosque = require('../models/Mosque');
 const User = require('../models/User');
+const Quote = require('../models/Quote');
+const AppReview = require('../models/AppReview');
 const { protect, admin } = require('../middleware/auth');
+const { cacheDel } = require('../config/redis');
 
 const { Op } = require('sequelize');
+
+// Must match APPROVED_REVIEWS_CACHE_KEY in routes/reviews.js
+const APPROVED_REVIEWS_CACHE_KEY = 'reviews:approved';
 
 router.get('/health', (req, res) => res.send('Admin API Healthy'));
 
@@ -34,15 +40,19 @@ router.get('/migrate/strip-maghrib', protect, admin, async (req, res) => {
 });
 
 // 1. Get all mosques (approved or pending) with pagination
+// ?pendingPhotos=true switches to the photo-moderation queue (all mosques with a
+// pending photo submission, regardless of which page they'd normally fall on).
 router.get('/mosques', protect, admin, async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = Math.min(100, parseInt(req.query.limit) || 50);
+    const limit = Math.min(500, parseInt(req.query.limit) || 50);
     const offset = (page - 1) * limit;
+    const pendingPhotosOnly = req.query.pendingPhotos === 'true';
 
     const { count, rows } = await Mosque.findAndCountAll({
+      where: pendingPhotosOnly ? { pendingPhotoUrl: { [Op.ne]: null } } : undefined,
       include: [{ model: User, as: 'addedBy', attributes: ['id', 'name', 'email'] }],
-      order: [['createdAt', 'DESC']],
+      order: [[pendingPhotosOnly ? 'updatedAt' : 'createdAt', 'DESC']],
       limit,
       offset,
     });
@@ -68,10 +78,13 @@ router.get('/mosques', protect, admin, async (req, res) => {
 router.get('/analytics', protect, admin, async (req, res) => {
   try {
     const totalMosques = await Mosque.count();
+    const approvedMosques = await Mosque.count({ where: { isApproved: true } });
     const pendingMosques = await Mosque.count({ where: { isApproved: false } });
     const pendingPhotos = await Mosque.count({ where: { pendingPhotoUrl: { [Op.ne]: null } } });
     const totalUsers = await User.count();
-    res.json({ totalMosques, pendingMosques, pendingPhotos, totalUsers });
+    const totalQuotes = await Quote.count();
+    const totalReviews = await AppReview.count();
+    res.json({ totalMosques, approvedMosques, pendingMosques, pendingPhotos, totalUsers, totalQuotes, totalReviews });
   } catch (err) {
     console.error('Admin Analytics Error:', err);
     res.status(500).json({ message: 'Error fetching analytics' });
@@ -168,14 +181,20 @@ router.delete('/mosques/:id', protect, admin, async (req, res) => {
 });
 
 // ── USER MANAGEMENT ─────────────────────────────────────────
-// GET all users
+// GET all users (paginated)
 router.get('/users', protect, admin, async (req, res) => {
   try {
-    const users = await User.findAll({
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(500, parseInt(req.query.limit) || 100);
+    const offset = (page - 1) * limit;
+
+    const { count, rows } = await User.findAndCountAll({
       attributes: ['id', 'name', 'email', 'role', 'createdAt'],
-      order: [['createdAt', 'DESC']]
+      order: [['createdAt', 'DESC']],
+      limit,
+      offset,
     });
-    res.json(users);
+    res.json({ users: rows, total: count, page, totalPages: Math.ceil(count / limit) });
   } catch (err) {
     res.status(500).json({ message: 'Server Error' });
   }
@@ -229,17 +248,21 @@ router.delete('/users/:id', protect, admin, async (req, res) => {
   }
 });
 
-const AppReview = require('../models/AppReview');
-
 // ── REVIEW MANAGEMENT ───────────────────────────────────────
-// GET all reviews for moderation
+// GET all reviews for moderation (paginated)
 router.get('/reviews', protect, admin, async (req, res) => {
   try {
-    const reviews = await AppReview.findAll({
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(500, parseInt(req.query.limit) || 100);
+    const offset = (page - 1) * limit;
+
+    const { count, rows } = await AppReview.findAndCountAll({
       include: [{ model: User, as: 'user', attributes: ['id', 'name', 'email'] }],
-      order: [['createdAt', 'DESC']]
+      order: [['createdAt', 'DESC']],
+      limit,
+      offset,
     });
-    res.json(reviews);
+    res.json({ reviews: rows, total: count, page, totalPages: Math.ceil(count / limit) });
   } catch (err) {
     res.status(500).json({ message: 'Server Error' });
   }
@@ -252,6 +275,7 @@ router.put('/reviews/:id/approve', protect, admin, async (req, res) => {
     if (!review) return res.status(404).json({ message: 'Review not found' });
     review.isApproved = true;
     await review.save();
+    await cacheDel(APPROVED_REVIEWS_CACHE_KEY);
     res.json({ message: 'Review approved', review });
   } catch (err) {
     res.status(500).json({ message: 'Server Error' });
@@ -263,7 +287,9 @@ router.delete('/reviews/:id', protect, admin, async (req, res) => {
   try {
     const review = await AppReview.findByPk(req.params.id);
     if (!review) return res.status(404).json({ message: 'Review not found' });
+    const wasApproved = review.isApproved;
     await review.destroy();
+    if (wasApproved) await cacheDel(APPROVED_REVIEWS_CACHE_KEY);
     res.json({ message: 'Review deleted' });
   } catch (err) {
     res.status(500).json({ message: 'Server Error' });
@@ -353,6 +379,42 @@ router.post('/settings/default-timings', protect, admin, async (req, res) => {
     res.json({ message: 'Default timings updated', timings: returnTimings });
   } catch (err) {
     console.error('POST default timings error:', err);
+    res.status(500).json({ message: 'Server Error' });
+  }
+});
+
+// GET Hijri date adjustment (whole days, e.g. -1, 0, +1)
+router.get('/settings/hijri-adjustment', protect, admin, async (req, res) => {
+  try {
+    const setting = await Settings.findOne({ where: { key: 'hijri_adjustment' } });
+    const days = setting?.value?.days;
+    res.json({ adjustment: typeof days === 'number' ? days : 0 });
+  } catch (err) {
+    console.error('GET hijri adjustment error:', err);
+    res.status(500).json({ message: 'Server Error' });
+  }
+});
+
+// POST/PUT update Hijri date adjustment
+router.post('/settings/hijri-adjustment', protect, admin, async (req, res) => {
+  try {
+    const days = parseInt(req.body.adjustment, 10);
+    if (isNaN(days) || days < -3 || days > 3) {
+      return res.status(400).json({ message: 'Adjustment must be a whole number between -3 and 3' });
+    }
+
+    let setting = await Settings.findOne({ where: { key: 'hijri_adjustment' } });
+    if (setting) {
+      setting.value = { days };
+      setting.changed('value', true);
+      await setting.save();
+    } else {
+      setting = await Settings.create({ key: 'hijri_adjustment', value: { days } });
+    }
+
+    res.json({ message: 'Hijri adjustment updated', adjustment: days });
+  } catch (err) {
+    console.error('POST hijri adjustment error:', err);
     res.status(500).json({ message: 'Server Error' });
   }
 });

@@ -4,6 +4,12 @@ const { Op, Transaction } = require('sequelize');
 const { sequelize } = require('../config/db');
 const Quote = require('../models/Quote');
 const { protect, admin } = require('../middleware/auth');
+const { cacheGet, cacheSet, cacheDel } = require('../config/redis');
+
+// Same quote is returned to every user all day — cache it so most requests
+// never touch the DB/transaction at all. Keyed by date, so it self-invalidates
+// at midnight regardless of TTL; the TTL just tidies up the old key in Redis.
+const DAILY_QUOTE_CACHE_TTL_SECONDS = 25 * 60 * 60;
 
 // --- PUBLIC ROUTE: Get Quote of the Day ---
 // Wrapped in a serializable transaction so concurrent requests can't both
@@ -11,6 +17,10 @@ const { protect, admin } = require('../middleware/auth');
 router.get('/daily', async (req, res) => {
   try {
     const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+
+    const cacheKey = `quote:daily:${today}`;
+    const cached = await cacheGet(cacheKey);
+    if (cached) return res.json(cached);
 
     let dailyQuote = await sequelize.transaction(
       { isolationLevel: Transaction.ISOLATION_LEVELS.SERIALIZABLE },
@@ -38,6 +48,7 @@ router.get('/daily', async (req, res) => {
     if (!dailyQuote) {
       return res.status(404).json({ message: 'No quotes available' });
     }
+    await cacheSet(cacheKey, dailyQuote, DAILY_QUOTE_CACHE_TTL_SECONDS);
     res.json(dailyQuote);
   } catch (err) {
     console.error('Daily quote error:', err);
@@ -79,6 +90,9 @@ router.delete('/:id', protect, admin, async (req, res) => {
     const quote = await Quote.findByPk(req.params.id);
     if (!quote) return res.status(404).json({ message: 'Quote not found' });
     await quote.destroy();
+    // In case this was today's cached quote-of-the-day — cheap to always clear,
+    // next /daily request just re-runs the normal pick logic either way.
+    await cacheDel(`quote:daily:${new Date().toISOString().split('T')[0]}`);
     res.json({ message: 'Quote removed' });
   } catch (err) {
     console.error('Quote delete error:', err);

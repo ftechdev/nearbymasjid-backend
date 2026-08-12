@@ -10,7 +10,10 @@ const { sendPasswordResetEmail } = require('../utils/mailer');
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 20,
+  // The automated test suite alone makes 25+ auth requests in one run to cover
+  // every validation branch — a real limit here would make tests flaky without
+  // this being any less strict for real traffic (NODE_ENV is only "test" under Jest).
+  max: process.env.NODE_ENV === 'test' ? 1000 : 20,
   message: { message: 'Too many login attempts. Please wait 15 minutes before trying again.' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -58,6 +61,16 @@ router.post('/register', authLimiter, async (req, res) => {
       token: generateToken(user.id),
     });
   } catch (error) {
+    // Two simultaneous signups with the same email both pass the earlier
+    // `userExists` check before either has written its row — the DB's unique
+    // constraint is what actually catches it, so it needs its own message
+    // instead of falling into the generic 500 below.
+    if (error.name === 'SequelizeUniqueConstraintError') {
+      return res.status(400).json({ message: 'An account with this email already exists. Try logging in instead, or use "Forgot Password" if you\'ve lost access.' });
+    }
+    if (error.name === 'SequelizeValidationError') {
+      return res.status(400).json({ message: error.errors?.[0]?.message || 'Please check your details and try again.' });
+    }
     console.error('[register] Error:', error);
     res.status(500).json({ message: 'Registration failed due to a server error. Please try again in a moment.' });
   }
@@ -155,11 +168,25 @@ router.post('/google', authLimiter, async (req, res) => {
 
     let user = await User.findOne({ where: { email } });
     if (!user) {
-      user = await User.create({
-        name: name || email.split('@')[0],
-        email,
-        // No password — Google users authenticate via Google only
-      });
+      try {
+        user = await User.create({
+          name: name || email.split('@')[0],
+          email,
+          // No password — Google users authenticate via Google only
+        });
+      } catch (createErr) {
+        // Two simultaneous first-time Google sign-ins for the same email —
+        // the other request's row landed first. Just use it instead of erroring.
+        if (createErr.name === 'SequelizeUniqueConstraintError') {
+          user = await User.findOne({ where: { email } });
+        } else {
+          throw createErr;
+        }
+      }
+    }
+
+    if (!user) {
+      return res.status(500).json({ message: 'Google sign-in failed — could not create your account. Please try again.' });
     }
 
     res.json({

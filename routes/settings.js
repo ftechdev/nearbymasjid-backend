@@ -37,4 +37,19 @@ router.get('/default-timings', async (req, res) => {
   }
 });
 
+// GET the Hijri date adjustment (whole days) — astronomical/tabular calculation
+// (what the Aladhan API returns) regularly differs by ±1 day from the date
+// actually announced by local moon-sighting committees. Admins correct this
+// monthly rather than the app silently showing a calculated-but-wrong date.
+router.get('/hijri-adjustment', async (req, res) => {
+  try {
+    const setting = await Settings.findOne({ where: { key: 'hijri_adjustment' } });
+    const days = setting?.value?.days;
+    res.json({ adjustment: typeof days === 'number' ? days : 0 });
+  } catch (error) {
+    console.error('Error fetching hijri adjustment:', error);
+    res.json({ adjustment: 0 });
+  }
+});
+
 module.exports = router;

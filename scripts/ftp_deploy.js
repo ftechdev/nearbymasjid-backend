@@ -13,8 +13,13 @@ const APP_ROOT = path.join(__dirname, '..');
 // Files that changed and need to be deployed
 const FILES_TO_DEPLOY = [
   'index.js',
-  'utils/uploadHandler.js',
+  'config/db.js',
+  'models/Mosque.js',
+  'models/Settings.js',
+  'routes/admin.js',
+  'routes/auth.js',
   'routes/mosques.js',
+  'routes/settings.js',
 ];
 
 (async () => {

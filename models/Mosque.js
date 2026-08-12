@@ -2,6 +2,18 @@ const { DataTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
 const User = require('./User');
 
+// iqamahTimings/timingsSubmittedBy/photoSubmittedBy are all `longtext` columns
+// under the hood (created before being typed as JSON here; sequelize.sync()
+// never alters existing column types), so none of them get auto-parsed back
+// into an object on every read the way a native JSON column would.
+function parseJsonColumn(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw); } catch { return null; }
+  }
+  return raw;
+}
+
 const Mosque = sequelize.define('Mosque', {
   id: {
     type: DataTypes.UUID,
@@ -38,14 +50,7 @@ const Mosque = sequelize.define('Mosque', {
   iqamahTimings: {
     type: DataTypes.JSON,
     allowNull: true,
-    get() {
-      const raw = this.getDataValue('iqamahTimings');
-      if (!raw) return null;
-      if (typeof raw === 'string') {
-        try { return JSON.parse(raw); } catch { return null; }
-      }
-      return raw;
-    },
+    get() { return parseJsonColumn(this.getDataValue('iqamahTimings')); },
   },
   timingsApproved: {
     type: DataTypes.BOOLEAN,
@@ -64,6 +69,7 @@ const Mosque = sequelize.define('Mosque', {
   photoSubmittedBy: {
     type: DataTypes.JSON, // { id, name, email, submittedAt }
     allowNull: true,
+    get() { return parseJsonColumn(this.getDataValue('photoSubmittedBy')); },
   },
   school: {
     type: DataTypes.ENUM('hanafi', 'shafi'),
@@ -72,12 +78,16 @@ const Mosque = sequelize.define('Mosque', {
   timingsSubmittedBy: {
     type: DataTypes.JSON, // { id, name, email, submittedAt }
     allowNull: true,
+    get() { return parseJsonColumn(this.getDataValue('timingsSubmittedBy')); },
   },
 }, {
   timestamps: true,
   indexes: [
     // Matches the WHERE clause used by the nearby-mosques search (GET /api/mosques)
     { fields: ['isApproved', 'lat', 'lng'] },
+    // Matches the duplicate-submission proximity check (POST /api/mosques), which
+    // has no isApproved filter and so can't use the leftmost prefix of the index above.
+    { fields: ['lat', 'lng'] },
   ],
 });
 

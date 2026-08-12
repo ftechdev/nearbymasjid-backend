@@ -3,6 +3,10 @@ const router = express.Router();
 const AppReview = require('../models/AppReview');
 const User = require('../models/User');
 const { protect, admin } = require('../middleware/auth');
+const { cacheGet, cacheSet, cacheDel } = require('../config/redis');
+
+const APPROVED_REVIEWS_CACHE_KEY = 'reviews:approved';
+const APPROVED_REVIEWS_CACHE_TTL_SECONDS = 5 * 60;
 
 // @desc    Create or Update my review
 // @route   POST /api/reviews
@@ -24,6 +28,8 @@ router.post('/', protect, async (req, res) => {
       review.comment = comment || null;
       review.isApproved = false; // Require re-approval after edit
       await review.save();
+      // Editing may have just pulled a previously-approved review out of public view
+      await cacheDel(APPROVED_REVIEWS_CACHE_KEY);
     } else {
       review = await AppReview.create({
         userId: req.user.id,
@@ -58,12 +64,16 @@ router.get('/me', protect, async (req, res) => {
 // NOTE: must be declared BEFORE GET / (admin route) so Express doesn't shadow it.
 router.get('/approved', async (req, res) => {
   try {
+    const cached = await cacheGet(APPROVED_REVIEWS_CACHE_KEY);
+    if (cached) return res.status(200).json(cached);
+
     const reviews = await AppReview.findAll({
       where: { isApproved: true },
       include: [{ model: User, as: 'user', attributes: ['name'] }],
       order: [['updatedAt', 'DESC']],
       limit: 20,
     });
+    await cacheSet(APPROVED_REVIEWS_CACHE_KEY, reviews, APPROVED_REVIEWS_CACHE_TTL_SECONDS);
     res.status(200).json(reviews);
   } catch (error) {
     console.error('Approved reviews fetch error:', error);
@@ -78,7 +88,9 @@ router.delete('/', protect, async (req, res) => {
   try {
     const review = await AppReview.findOne({ where: { userId: req.user.id } });
     if (!review) return res.status(404).json({ message: 'Review not found' });
+    const wasApproved = review.isApproved;
     await review.destroy();
+    if (wasApproved) await cacheDel(APPROVED_REVIEWS_CACHE_KEY);
     res.status(200).json({ message: 'Review deleted successfully' });
   } catch (error) {
     console.error('Review delete error:', error);
