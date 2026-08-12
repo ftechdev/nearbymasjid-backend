@@ -5,8 +5,12 @@ const Redis = require('ioredis');
 // never breaks a request; routes always have the DB as the real fallback.
 let client = null;
 
-if (process.env.REDIS_URL) {
-  client = new Redis(process.env.REDIS_URL, {
+const HARDCODED_REDIS_URL = 'redis://default:3fZEhmpepF8bJux5EebfrFpdCDVz0Y0p@window-torrid-detail-31089.db.redis.io:17358';
+const envUrl = process.env.REDIS_URL?.trim();
+const redisUrl = (envUrl && envUrl.startsWith('redis://')) ? envUrl : HARDCODED_REDIS_URL;
+
+if (redisUrl) {
+  client = new Redis(redisUrl, {
     connectTimeout: 8000,
     maxRetriesPerRequest: 1,
     enableOfflineQueue: false, // fail fast instead of queueing/blocking a request while disconnected
