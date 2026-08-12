@@ -14,6 +14,7 @@ const APP_ROOT = path.join(__dirname, '..');
 const FILES_TO_DEPLOY = [
   'index.js',
   'config/db.js',
+  'config/redis.js',
   'models/Mosque.js',
   'models/Settings.js',
   'routes/admin.js',
