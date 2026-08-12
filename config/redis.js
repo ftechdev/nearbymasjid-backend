@@ -13,7 +13,7 @@ if (process.env.REDIS_URL) {
     retryStrategy: (times) => Math.min(times * 1000, 10000),
   });
 
-  client.on('connect', () => console.log('✅ Redis connected'));
+  client.on('ready', () => console.log('✅ Redis connected & authenticated successfully'));
   client.on('error', (err) => console.warn('⚠️ Redis error (cache disabled for this op):', err.message));
 } else {
   console.log('ℹ️  REDIS_URL not set — running without a cache layer (DB-only, still fully functional)');
