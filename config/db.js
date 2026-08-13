@@ -18,11 +18,11 @@ const sequelize = new Sequelize(
     pool: process.env.NODE_ENV === 'test'
       ? { max: 2, min: 0, acquire: 30000, idle: 5000, evict: 5000 }
       : {
-          max: 10,          // Max concurrent open connections
-          min: 1,           // Keep at least 1 active connection warm at all times
+          max: 5,           // Reduced max open connections to prevent quota exhaustion
+          min: 0,           // min: 0 prevents constant reconnection attempts
           acquire: 30000,   // Max ms to wait for connection
-          idle: 30000,      // Release extra idle connections after 30s
-          evict: 15000,     // Evict stale connections every 15s
+          idle: 60000,      // Keep connection alive up to 60s for reuse
+          evict: 30000,     // Evict stale connections every 30s
         },
     dialectOptions: {
       connectTimeout: 30000,
