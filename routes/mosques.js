@@ -50,7 +50,7 @@ router.get('/', async (req, res) => {
 
     const where = { isApproved: true };
 
-    // Validate coordinates & restrict DB query to a bounding box (20 km radius)
+    // Validate coordinates
     let latNum, lngNum;
     if (lat || lng) {
       latNum = parseFloat(lat);
@@ -58,22 +58,35 @@ router.get('/', async (req, res) => {
       if (isNaN(latNum) || isNaN(lngNum) || latNum < -90 || latNum > 90 || lngNum < -180 || lngNum > 180) {
         return res.status(400).json({ message: 'Invalid latitude or longitude' });
       }
-      const RADIUS_KM = 20;
-      const latDelta = RADIUS_KM / 111;
-      const lngDelta = RADIUS_KM / (111 * Math.cos(latNum * Math.PI / 180));
-      where.lat = { [Op.between]: [latNum - latDelta, latNum + latDelta] };
-      where.lng = { [Op.between]: [lngNum - lngDelta, lngNum + lngDelta] };
+      // Apply bounding box only when no keyword search is active
+      if (!keyword) {
+        const RADIUS_KM = 50; // Expanded to 50 km radius for better coverage
+        const latDelta = RADIUS_KM / 111;
+        const lngDelta = RADIUS_KM / (111 * Math.cos(latNum * Math.PI / 180));
+        where.lat = { [Op.between]: [latNum - latDelta, latNum + latDelta] };
+        where.lng = { [Op.between]: [lngNum - lngDelta, lngNum + lngDelta] };
+      }
     }
 
     // Keyword filter — applied in DB for name/address fields
     if (keyword) {
+      const cleanKeyword = keyword.trim();
       where[Op.or] = [
-        { name: { [Op.like]: `%${keyword}%` } },
-        { address: { [Op.like]: `%${keyword}%` } },
+        { name: { [Op.like]: `%${cleanKeyword}%` } },
+        { address: { [Op.like]: `%${cleanKeyword}%` } },
       ];
     }
 
-    const { count, rows } = await Mosque.findAndCountAll({ where, limit, offset, order: [['createdAt', 'DESC']] });
+    let { count, rows } = await Mosque.findAndCountAll({ where, limit, offset, order: [['createdAt', 'DESC']] });
+
+    // Fallback: If bounding box returned 0 mosques and no keyword was specified, return all approved mosques
+    if (rows.length === 0 && !keyword) {
+      delete where.lat;
+      delete where.lng;
+      const fallbackResult = await Mosque.findAndCountAll({ where: { isApproved: true }, limit, offset, order: [['createdAt', 'DESC']] });
+      rows = fallbackResult.rows;
+    }
+
     let mosques = rows.map(m => m.toJSON());
 
     // ── Merge Google Places results ────────────────────────────────────────────
