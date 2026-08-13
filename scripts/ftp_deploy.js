@@ -21,6 +21,7 @@ const FILES_TO_DEPLOY = [
   'routes/auth.js',
   'routes/mosques.js',
   'routes/settings.js',
+  'utils/uploadHandler.js',
 ];
 
 (async () => {
