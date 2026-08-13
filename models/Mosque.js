@@ -59,12 +59,30 @@ const Mosque = sequelize.define('Mosque', {
   photoUrl: {
     type: DataTypes.STRING(500),
     allowNull: true,
+    get() {
+      const val = this.getDataValue('photoUrl');
+      if (!val) return null;
+      if (val.startsWith('/uploads/')) {
+        const mediaHost = process.env.MEDIA_PUBLIC_URL || 'https://nearbymosque.in';
+        return `${mediaHost}${val}`;
+      }
+      return val;
+    },
   },
   // Pending replacement photo — goes live only after admin approves it.
   // The live photoUrl above is untouched until then.
   pendingPhotoUrl: {
     type: DataTypes.STRING(500),
     allowNull: true,
+    get() {
+      const val = this.getDataValue('pendingPhotoUrl');
+      if (!val) return null;
+      if (val.startsWith('/uploads/')) {
+        const mediaHost = process.env.MEDIA_PUBLIC_URL || 'https://nearbymosque.in';
+        return `${mediaHost}${val}`;
+      }
+      return val;
+    },
   },
   photoSubmittedBy: {
     type: DataTypes.JSON, // { id, name, email, submittedAt }
