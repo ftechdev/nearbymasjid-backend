@@ -45,6 +45,8 @@ const ALLOWED_ORIGINS = [
   process.env.FRONTEND_URL,
   'http://localhost:5173',
   'http://localhost:3000',
+  'https://nearbymosque.in',
+  'https://www.nearbymosque.in',
 ].filter(Boolean);
 
 app.use(cors({
