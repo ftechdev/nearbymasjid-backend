@@ -42,17 +42,25 @@ router.get('/migrate/strip-maghrib', protect, admin, async (req, res) => {
 // 1. Get all mosques (approved or pending) with pagination
 // ?pendingPhotos=true switches to the photo-moderation queue (all mosques with a
 // pending photo submission, regardless of which page they'd normally fall on).
+// ?pendingOnly=true switches to the review queue: new unapproved submissions
+// PLUS already-approved mosques with an unverified timing edit — regardless
+// of which page they'd normally fall on.
 router.get('/mosques', protect, admin, async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(500, parseInt(req.query.limit) || 50);
     const offset = (page - 1) * limit;
     const pendingPhotosOnly = req.query.pendingPhotos === 'true';
+    const pendingOnly = req.query.pendingOnly === 'true';
+
+    let where;
+    if (pendingPhotosOnly) where = { pendingPhotoUrl: { [Op.ne]: null } };
+    else if (pendingOnly) where = { [Op.or]: [{ isApproved: false }, { timingsApproved: false }] };
 
     const { count, rows } = await Mosque.findAndCountAll({
-      where: pendingPhotosOnly ? { pendingPhotoUrl: { [Op.ne]: null } } : undefined,
+      where,
       include: [{ model: User, as: 'addedBy', attributes: ['id', 'name', 'email'] }],
-      order: [[pendingPhotosOnly ? 'updatedAt' : 'createdAt', 'DESC']],
+      order: [[(pendingPhotosOnly || pendingOnly) ? 'updatedAt' : 'createdAt', 'DESC']],
       limit,
       offset,
     });
@@ -79,7 +87,11 @@ router.get('/analytics', protect, admin, async (req, res) => {
   try {
     const totalMosques = await Mosque.count();
     const approvedMosques = await Mosque.count({ where: { isApproved: true } });
-    const pendingMosques = await Mosque.count({ where: { isApproved: false } });
+    // "Pending" covers both brand-new mosque submissions AND approved mosques
+    // whose iqamah timings were edited since the last approval — otherwise a
+    // timing update on an already-approved mosque never surfaces anywhere for
+    // admin review.
+    const pendingMosques = await Mosque.count({ where: { [Op.or]: [{ isApproved: false }, { timingsApproved: false }] } });
     const pendingPhotos = await Mosque.count({ where: { pendingPhotoUrl: { [Op.ne]: null } } });
     const totalUsers = await User.count();
     const totalQuotes = await Quote.count();
@@ -154,9 +166,11 @@ router.put('/mosques/:id', protect, admin, async (req, res) => {
     if (lng !== undefined && !isNaN(parseFloat(lng))) mosque.lng = parseFloat(lng);
     if (iqamahTimings !== undefined) {
       const raw = typeof iqamahTimings === 'string' ? JSON.parse(iqamahTimings) : iqamahTimings;
-      // Maghrib is always location-based sunset — never store it as a fixed iqamah time
-      delete raw.maghrib;
-      mosque.iqamahTimings = raw;
+      if (raw && typeof raw === 'object') {
+        // Maghrib is always location-based sunset — never store it as a fixed iqamah time
+        delete raw.maghrib;
+      }
+      mosque.iqamahTimings = raw || null;
     }
 
     await mosque.save();

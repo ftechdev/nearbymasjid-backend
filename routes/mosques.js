@@ -31,11 +31,44 @@ function googleCacheKey(lat, lng, keyword) {
   return `google:${parseFloat(lat).toFixed(2)},${parseFloat(lng).toFixed(2)},${keyword || ''}`;
 }
 
+// ── Same-mosque matching (Google Places ↔ DB) ──────────────────────────────────
+// Most DB mosques are added by hand (map pin + free-text name) and never carry a
+// googlePlaceId, so an exact-id match alone misses the vast majority of real
+// duplicates — the same physical mosque then shows up as two separate,
+// unlinked cards. This falls back to proximity + fuzzy name matching so a DB
+// mosque and its Google Places twin are recognised as ONE mosque and combined
+// into a single card instead of either duplicating or silently dropping data.
+const SAME_MOSQUE_DISTANCE_THRESHOLD = 0.0009; // ~100 m — matches POST /api/mosques's own duplicate check
+// Tighter radius used when neither name is usable for comparison (e.g. both
+// normalise to "" after stripping generic words like "Jama Masjid") — proximity
+// alone is a much weaker signal, so require near-exact overlap (~30-40 m) to
+// avoid merging two genuinely distinct, closely-spaced mosques.
+const SAME_MOSQUE_NAMELESS_DISTANCE_THRESHOLD = 0.0003;
+
+function normaliseMosqueName(name) {
+  return (name || '')
+    .toLowerCase()
+    .replace(/masjid|mosque|jama|jamia|jame|the/g, '')
+    .replace(/[^a-z0-9]/g, '')
+    .trim();
+}
+
+function isSameMosque(a, b) {
+  const n1 = normaliseMosqueName(a.name);
+  const n2 = normaliseMosqueName(b.name);
+  const hasUsableName = n1 && n2;
+  const threshold = hasUsableName ? SAME_MOSQUE_DISTANCE_THRESHOLD : SAME_MOSQUE_NAMELESS_DISTANCE_THRESHOLD;
+  const closeBy = Math.abs(a.lat - b.lat) < threshold && Math.abs(a.lng - b.lng) < threshold;
+  if (!closeBy) return false;
+  if (!hasUsableName) return true; // no usable name on one side — only trust very tight proximity
+  return n1 === n2 || n1.includes(n2) || n2.includes(n1);
+}
+
 // ── Whitelist of allowed fields from client-supplied mosqueData ────────────────
 // SECURITY: prevents clients from injecting arbitrary columns (userId, isApproved…)
 function sanitiseMosqueData(raw) {
-  const { name, address, lat, lng, googlePlaceId, school } = raw || {};
-  return { name, address, lat, lng, googlePlaceId, school };
+  const { name, address, lat, lng, googlePlaceId, school, photoUrl } = raw || {};
+  return { name, address, lat, lng, googlePlaceId, school, photoUrl };
 }
 
 // ── GET /api/mosques ───────────────────────────────────────────────────────────
@@ -115,36 +148,64 @@ router.get('/', async (req, res) => {
             console.error('Google Places API Status:', googleRes.data.status, googleRes.data.error_message || '');
           }
 
-          googleMosques = (googleRes.data?.results || []).map(place => {
-            const localMatch = mosques.find(m => m.googlePlaceId === place.place_id);
-            return {
-              id: place.place_id,
-              name: place.name,
-              address: place.vicinity,
-              lat: place.geometry.location.lat,
-              lng: place.geometry.location.lng,
-              rating: place.rating || 0,
-              // SECURITY: photo reference is proxied through our own endpoint —
-              // the Google API key is NEVER sent to the client.
-              photoUrl: place.photos?.length
-                ? `/api/mosques/proxy-photo?ref=${encodeURIComponent(place.photos[0].photo_reference)}`
-                : null,
-              iqamahTimings: localMatch ? localMatch.iqamahTimings : null,
-              timingsApproved: localMatch ? localMatch.timingsApproved : false,
-              isGoogle: true,
-            };
-          });
+          googleMosques = (googleRes.data?.results || []).map(place => ({
+            id: place.place_id,
+            name: place.name,
+            address: place.vicinity,
+            lat: place.geometry.location.lat,
+            lng: place.geometry.location.lng,
+            rating: place.rating || 0,
+            // SECURITY: photo reference is proxied through our own endpoint —
+            // the Google API key is NEVER sent to the client.
+            photoUrl: place.photos?.length
+              ? `/api/mosques/proxy-photo?ref=${encodeURIComponent(place.photos[0].photo_reference)}`
+              : null,
+            isGoogle: true,
+          }));
 
           await cacheSet(cacheKey, googleMosques, GOOGLE_CACHE_TTL_SECONDS);
         } catch (err) {
-          
+
           console.error('Google API Request Failed:', err.message);
           googleMosques = [];
         }
       }
 
-      // De-duplicate: skip Google results already in our DB
-      const uniqueGoogle = googleMosques.filter(g => !mosques.some(m => m.googlePlaceId === g.id));
+      // ── Merge, don't duplicate: fold each Google result that matches a DB
+      // mosque INTO that DB mosque's card (keeping the DB row as the single
+      // source of truth for edits), and backfill the link so future requests
+      // match instantly by googlePlaceId without needing the name/proximity
+      // fallback again.
+      const consumedGoogleIds = new Set();
+      for (const m of mosques) {
+        let g = null;
+        if (m.googlePlaceId) {
+          // Already linked to a specific Google place — that link is authoritative.
+          // Only enrich from THAT exact place if it happens to be in this
+          // response; never fuzzy-match an already-linked mosque to a
+          // *different* nearby place just because its own didn't show up here.
+          g = googleMosques.find(gm => gm.id === m.googlePlaceId);
+        } else {
+          g = googleMosques.find(gm => !consumedGoogleIds.has(gm.id) && isSameMosque(m, gm));
+          if (g) {
+            try {
+              await Mosque.update({ googlePlaceId: g.id }, { where: { id: m.id } });
+              m.googlePlaceId = g.id;
+            } catch (err) {
+              console.error('Failed to backfill googlePlaceId link:', err.message);
+            }
+          }
+        }
+        if (g) {
+          consumedGoogleIds.add(g.id);
+          m.rating = g.rating || m.rating || 0;
+          if (!m.photoUrl) m.photoUrl = g.photoUrl;
+          m.isGoogle = false; // Backed by a real DB row — edits always target it directly
+        }
+      }
+
+      // Remaining Google results have no DB counterpart yet — list them as-is
+      const uniqueGoogle = googleMosques.filter(g => !consumedGoogleIds.has(g.id) && !mosques.some(m => m.googlePlaceId === g.id));
       mosques = [...mosques, ...uniqueGoogle];
     }
 
@@ -202,7 +263,10 @@ router.post('/', protect, writeLimiter, async (req, res) => {
       // and mark timings as pending — admin review still required
       duplicate.name    = name;
       duplicate.address = address;
-      duplicate.school  = school === 'hanafi' ? 'hanafi' : 'shafi';
+      // Only touch school if the caller actually sent one — a timings-only
+      // follow-up submission has no `school` field and shouldn't silently
+      // reset a previously-set 'hanafi' back to the 'shafi' default.
+      if (school !== undefined) duplicate.school = school === 'hanafi' ? 'hanafi' : 'shafi';
       if (iqamahTimings) {
         duplicate.iqamahTimings   = typeof iqamahTimings === 'string' ? JSON.parse(iqamahTimings) : iqamahTimings;
         duplicate.timingsApproved = false;
@@ -335,16 +399,20 @@ router.put('/:id/photo', protect, writeLimiter, async (req, res) => {
     try { mosque = await Mosque.findByPk(req.params.id); } catch { }
     if (!mosque) mosque = await Mosque.findOne({ where: { googlePlaceId: req.params.id } });
 
-    // First-ever photo for a Google-sourced mosque not yet in our DB — goes live immediately.
-    // SECURITY: whitelist fields.
+    // First-ever photo for a Google-sourced mosque not yet in our DB.
+    // SECURITY: whitelist fields — mosqueData is entirely client-supplied, so
+    // (like every other new-mosque creation path in this file) it must start
+    // unapproved. Trusting it live here would let any authenticated user
+    // publish a fabricated mosque straight to the public map with fake
+    // name/address/coordinates and no admin review.
     if (!mosque && mosqueData) {
       mosque = await Mosque.create({
         ...sanitiseMosqueData(mosqueData),
         photoUrl,
         userId: req.user.id,
-        isApproved: true,
+        isApproved: false,
       });
-      return res.json({ message: 'Photo added successfully', photoUrl: mosque.photoUrl, pending: false });
+      return res.json({ message: 'Mosque and photo submitted for admin review', photoUrl: mosque.photoUrl, pending: true });
     }
 
     if (!mosque) return res.status(404).json({ message: 'Mosque not found' });

@@ -1,6 +1,18 @@
 const { Sequelize } = require('sequelize');
 require('dotenv').config();
 
+// This machine's IPv6 route to Hostinger's DB host times out even though IPv4
+// connects in <300ms (Hostinger's DNS record has both an A and AAAA entry).
+// mysql2 opens its socket with the legacy `net.connect(port, host)` form (see
+// mysql2/lib/base/connection.js), which can't be given an explicit `family`,
+// so Node's Happy-Eyeballs dual-stack racing (`autoSelectFamily`, on by
+// default since Node 20) still occasionally tries the dead IPv6 address
+// before/alongside IPv4 and can time the whole attempt out. Disabling
+// autoSelectFamily plus IPv4-first DNS ordering makes that lookup resolve to
+// (and connect over) IPv4 only, process-wide.
+require('dns').setDefaultResultOrder('ipv4first');
+require('net').setDefaultAutoSelectFamily(false);
+
 const sequelize = new Sequelize(
   process.env.DB_NAME,
   process.env.DB_USER,
@@ -52,6 +64,26 @@ function startDbKeepAlive() {
 // process a chance to recover on its own. A bad password/host/DB name never
 // will, so those still exit immediately rather than retrying forever.
 const RETRYABLE_ERROR_PATTERN = /max_connections_per_hour|too many connections|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|ECONNRESET|PROTOCOL_CONNECTION_LOST/i;
+
+// Sequelize wraps the real driver error in `.original`/`.parent`, and Node's
+// dual-stack (IPv4+IPv6) connection attempts can further wrap THAT in an
+// AggregateError whose own `.message` is "" — the actual code/message only
+// shows up on its nested `.errors[]`. Checking only the outer `error.message`
+// (as this used to) can see an empty string for a perfectly transient,
+// retryable failure and wrongly treat it as a fatal bad-credentials error.
+function describeConnectionError(error) {
+  const parts = [];
+  const visit = (err, depth) => {
+    if (!err || depth > 4) return;
+    const bits = [err.code, err.message].filter(Boolean);
+    if (bits.length) parts.push(bits.join(': '));
+    if (Array.isArray(err.errors)) err.errors.forEach(e => visit(e, depth + 1));
+    if (err.original) visit(err.original, depth + 1);
+    if (err.parent) visit(err.parent, depth + 1);
+  };
+  visit(error, 0);
+  return parts.length ? parts.join(' | ') : (error.message || error.name || 'Unknown error');
+}
 
 const connectDB = async (retryDelayMs = 5000) => {
   try {
@@ -109,19 +141,20 @@ const connectDB = async (retryDelayMs = 5000) => {
     // the crash this whole retry mechanism exists to avoid. So under tests,
     // just log and stop: let the specific test file's own assertions fail
     // naturally against the unreachable DB, instead of retrying or exiting.
+    const description = describeConnectionError(error);
     if (process.env.NODE_ENV === 'test') {
-      console.error('⚠️ [test] MySQL connection failed, not retrying under NODE_ENV=test:', error.message);
+      console.error('⚠️ [test] MySQL connection failed, not retrying under NODE_ENV=test:', description);
       return;
     }
-    if (RETRYABLE_ERROR_PATTERN.test(error.message)) {
-      console.error(`⚠️ MySQL connection failed (transient — retrying in ${retryDelayMs / 1000}s): ${error.message}`);
+    if (RETRYABLE_ERROR_PATTERN.test(description)) {
+      console.error(`⚠️ MySQL connection failed (transient — retrying in ${retryDelayMs / 1000}s): ${description}`);
       // The server keeps running and accepting requests while this retries in
       // the background; DB-dependent routes just 500 until a retry succeeds,
       // instead of the whole process dying and needing a manual restart.
       setTimeout(() => connectDB(Math.min(retryDelayMs * 2, 5 * 60 * 1000)), retryDelayMs);
       return;
     }
-    console.error('❌ MySQL connection error (not transient — check DB_HOST/DB_USER/DB_PASS/DB_NAME):', error.message);
+    console.error('❌ MySQL connection error (not transient — check DB_HOST/DB_USER/DB_PASS/DB_NAME):', description);
     process.exit(1);
   }
 };
