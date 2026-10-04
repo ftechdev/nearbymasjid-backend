@@ -214,6 +214,37 @@ describe('Mosque routes (/api/mosques)', () => {
     await User.destroy({ where: { id: otherUser._id } });
   });
 
+  // ── Jumma "OFF" (this masjid holds no Jumma) ──────────────────────────────
+  // 'OFF' locks only the Jumma time — every other prayer time must stay editable.
+  test('PUT /:id/timings with Jumma OFF still saves every other prayer time sent with it', async () => {
+    const res = await request(app)
+      .put(`/api/mosques/${createdMosqueId}/timings`)
+      .set('Authorization', `Bearer ${user.token}`)
+      .send({ iqamahTimings: { fajr: '05:10', dhuhr: '13:40', asr: '17:05', isha: '20:50', jumma: 'OFF' } });
+    expect(res.status).toBe(200);
+    expect(res.body.iqamahTimings).toMatchObject({ fajr: '05:10', dhuhr: '13:40', asr: '17:05', isha: '20:50', jumma: 'OFF' });
+
+    const dbRow = await Mosque.findByPk(createdMosqueId);
+    expect(dbRow.iqamahTimings).toMatchObject({ fajr: '05:10', dhuhr: '13:40', asr: '17:05', isha: '20:50', jumma: 'OFF' });
+  });
+
+  test('while Jumma is OFF the other times can be edited again, and a real Jumma time un-locks it', async () => {
+    // A blank Jumma is ignored (blank never erases a stored value), so it stays OFF.
+    let res = await request(app)
+      .put(`/api/mosques/${createdMosqueId}/timings`)
+      .set('Authorization', `Bearer ${user.token}`)
+      .send({ iqamahTimings: { asr: '17:15', isha: '21:00', jumma: '' } });
+    expect(res.status).toBe(200);
+    expect(res.body.iqamahTimings).toMatchObject({ asr: '17:15', isha: '21:00', jumma: 'OFF' });
+
+    res = await request(app)
+      .put(`/api/mosques/${createdMosqueId}/timings`)
+      .set('Authorization', `Bearer ${user.token}`)
+      .send({ iqamahTimings: { jumma: '13:30' } });
+    expect(res.status).toBe(200);
+    expect(res.body.iqamahTimings).toMatchObject({ asr: '17:15', isha: '21:00', jumma: '13:30' });
+  });
+
   // ── PUT /:id/photo ────────────────────────────────────────────────────────
   test('PUT /:id/photo on an EXISTING mosque goes to pending review, not live immediately', async () => {
     const res = await request(app)
@@ -223,9 +254,11 @@ describe('Mosque routes (/api/mosques)', () => {
     expect(res.status).toBe(200);
     expect(res.body.pending).toBe(true);
 
+    // Compare the stored values — the model's getters turn "/uploads/…" paths
+    // into full URLs, so the plain properties never equal the path that was sent.
     const dbRow = await Mosque.findByPk(createdMosqueId);
-    expect(dbRow.pendingPhotoUrl).toBe('/uploads/test-photo.jpg');
-    expect(dbRow.photoUrl).not.toBe('/uploads/test-photo.jpg'); // live photo untouched
+    expect(dbRow.getDataValue('pendingPhotoUrl')).toBe('/uploads/test-photo.jpg');
+    expect(dbRow.getDataValue('photoUrl')).not.toBe('/uploads/test-photo.jpg'); // live photo untouched
   });
 
   // ── GET /my-mosques ───────────────────────────────────────────────────────
