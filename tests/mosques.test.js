@@ -1,5 +1,4 @@
 const request = require('supertest');
-const { Op } = require('sequelize');
 const app = require('../index');
 const { registerTestUser, createTestAdmin, testName, User, Mosque } = require('./testHelpers');
 
@@ -9,10 +8,18 @@ const { registerTestUser, createTestAdmin, testName, User, Mosque } = require('.
 const TEST_LAT = -75.123456;
 const TEST_LNG = 0.123456;
 
+// The duplicate check compares names with generic words ("masjid", "mosque",
+// "jama"…) stripped out, so these fixtures need a distinctive word each — a
+// label made only of generic words would reduce to the shared run-tag prefix
+// and look like a match for every other fixture in this file.
+const MOSQUE_NAME = testName('noor masjid');
+const NEARBY_MOSQUE_NAME = testName('bilal masjid');
+
 describe('Mosque routes (/api/mosques)', () => {
   let user;
   let createdMosqueId;
   let googleImportedMosqueId;
+  const extraMosqueIds = [];
 
   beforeAll(async () => {
     user = await registerTestUser(request, app, 'mosques-user');
@@ -21,6 +28,7 @@ describe('Mosque routes (/api/mosques)', () => {
   afterAll(async () => {
     if (createdMosqueId) await Mosque.destroy({ where: { id: createdMosqueId } });
     if (googleImportedMosqueId) await Mosque.destroy({ where: { id: googleImportedMosqueId } });
+    if (extraMosqueIds.length) await Mosque.destroy({ where: { id: extraMosqueIds } });
     await User.destroy({ where: { id: user._id } });
   });
 
@@ -67,7 +75,7 @@ describe('Mosque routes (/api/mosques)', () => {
       .post('/api/mosques')
       .set('Authorization', `Bearer ${user.token}`)
       .send({
-        name: testName('mosque'),
+        name: MOSQUE_NAME,
         address: testName('address'),
         location: { lat: TEST_LAT, lng: TEST_LNG },
         school: 'hanafi',
@@ -80,25 +88,76 @@ describe('Mosque routes (/api/mosques)', () => {
   test('GET /api/mosques/:id finds the newly created mosque', async () => {
     const res = await request(app).get(`/api/mosques/${createdMosqueId}`);
     expect(res.status).toBe(200);
-    expect(res.body.name).toBe(testName('mosque'));
+    expect(res.body.name).toBe(MOSQUE_NAME);
   });
 
-  test('POST /api/mosques with the same coordinates updates the existing mosque instead of creating a duplicate', async () => {
+  // ── Duplicate handling ────────────────────────────────────────────────────
+  // A submission is only "already added" when the NAME matches a mosque at the
+  // same spot — and even then the existing row must never be modified by it.
+  test('POST /api/mosques with the same name at the same coordinates is rejected as already added and leaves the existing mosque untouched', async () => {
     const res = await request(app)
       .post('/api/mosques')
       .set('Authorization', `Bearer ${user.token}`)
       .send({
-        name: testName('mosque (renamed)'),
-        address: testName('address'),
+        name: MOSQUE_NAME,
+        address: testName('a different address'),
         location: { lat: TEST_LAT, lng: TEST_LNG },
-        school: 'hanafi',
+        school: 'shafi',
+        iqamahTimings: { fajr: '04:00' },
+        photoUrl: '/uploads/must-not-be-applied.jpg',
       });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(409);
     expect(res.body.message).toMatch(/already added/i);
     expect(res.body.mosque.id).toBe(createdMosqueId);
 
-    const total = await Mosque.count({ where: { name: { [Op.like]: `${testName('mosque')}%` } } });
+    const dbRow = await Mosque.findByPk(createdMosqueId);
+    expect(dbRow.name).toBe(MOSQUE_NAME);
+    expect(dbRow.address).toBe(testName('address'));
+    expect(dbRow.school).toBe('hanafi');
+    expect(dbRow.iqamahTimings).toBeNull();
+    expect(dbRow.photoUrl).toBeNull();
+
+    const total = await Mosque.count({ where: { name: MOSQUE_NAME } });
     expect(total).toBe(1); // still exactly one row, not two
+  });
+
+  test('POST /api/mosques for a differently-named mosque at the same coordinates creates a separate mosque', async () => {
+    const res = await request(app)
+      .post('/api/mosques')
+      .set('Authorization', `Bearer ${user.token}`)
+      .send({
+        name: NEARBY_MOSQUE_NAME,
+        address: testName('next door address'),
+        location: { lat: TEST_LAT, lng: TEST_LNG },
+        school: 'shafi',
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.id).not.toBe(createdMosqueId);
+    expect(res.body.isApproved).toBe(false);
+    extraMosqueIds.push(res.body.id);
+
+    // The mosque that was already there keeps its own details.
+    const existing = await Mosque.findByPk(createdMosqueId);
+    expect(existing.name).toBe(MOSQUE_NAME);
+    expect(existing.address).toBe(testName('address'));
+    expect(existing.school).toBe('hanafi');
+  });
+
+  test('POST /api/mosques with confirmNew adds a separate mosque even when the name matches', async () => {
+    const res = await request(app)
+      .post('/api/mosques')
+      .set('Authorization', `Bearer ${user.token}`)
+      .send({
+        name: MOSQUE_NAME,
+        address: testName('same name, other building'),
+        location: { lat: TEST_LAT, lng: TEST_LNG },
+        school: 'hanafi',
+        confirmNew: true,
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.id).not.toBe(createdMosqueId);
+    expect(res.body.isApproved).toBe(false);
+    extraMosqueIds.push(res.body.id);
   });
 
   // ── PUT /:id/timings ──────────────────────────────────────────────────────

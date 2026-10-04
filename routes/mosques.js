@@ -38,7 +38,7 @@ function googleCacheKey(lat, lng, keyword) {
 // unlinked cards. This falls back to proximity + fuzzy name matching so a DB
 // mosque and its Google Places twin are recognised as ONE mosque and combined
 // into a single card instead of either duplicating or silently dropping data.
-const SAME_MOSQUE_DISTANCE_THRESHOLD = 0.0009; // ~100 m — matches POST /api/mosques's own duplicate check
+const SAME_MOSQUE_DISTANCE_THRESHOLD = 0.0009; // ~100 m — also the radius of POST /api/mosques's duplicate check
 // Tighter radius used when neither name is usable for comparison (e.g. both
 // normalise to "" after stripping generic words like "Jama Masjid") — proximity
 // alone is a much weaker signal, so require near-exact overlap (~30-40 m) to
@@ -62,6 +62,23 @@ function isSameMosque(a, b) {
   if (!closeBy) return false;
   if (!hasUsableName) return true; // no usable name on one side — only trust very tight proximity
   return n1 === n2 || n1.includes(n2) || n2.includes(n1);
+}
+
+// ── Duplicate-submission matching (POST /api/mosques) ──────────────────────────
+// Deliberately stricter than isSameMosque(): that one may fall back to proximity
+// alone, which is fine for folding a Google Places twin into its DB row, but here
+// a false positive stops someone adding a genuinely different masjid that simply
+// stands next door. So a nearby row only counts as "already added" when the NAME
+// matches too — and when neither name survives normalisation (both generic like
+// "Jama Masjid", or written in a non-Latin script) only an identical name counts.
+// A miss costs little: every new submission still goes through admin review.
+function isDuplicateSubmission(existing, incomingName) {
+  const n1 = normaliseMosqueName(existing.name);
+  const n2 = normaliseMosqueName(incomingName);
+  if (n1 && n2) return n1 === n2 || n1.includes(n2) || n2.includes(n1);
+  if (n1 || n2) return false; // one generic name, one distinctive — not the same masjid
+  const raw = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  return raw(existing.name) === raw(incomingName);
 }
 
 // ── Whitelist of allowed fields from client-supplied mosqueData ────────────────
@@ -240,48 +257,37 @@ router.get('/proxy-photo', async (req, res) => {
 // ── POST /api/mosques — Submit a new mosque ───────────────────────────────────
 router.post('/', protect, writeLimiter, async (req, res) => {
   try {
-    const { name, address, location, school, iqamahTimings, photoUrl } = req.body;
+    const { name, address, location, school, iqamahTimings, photoUrl, confirmNew } = req.body;
     if (!name || !address || !location?.lat) {
       return res.status(400).json({ message: 'Name, address and location are required' });
     }
 
-    // Proximity check (~100 m) — bounded box so it stays fast as table grows
-    const threshold = 0.0009;
-    const nearbyMosques = await Mosque.findAll({
-      where: {
-        lat: { [Op.between]: [location.lat - threshold, location.lat + threshold] },
-        lng: { [Op.between]: [location.lng - threshold, location.lng + threshold] },
-      },
-    });
-    const duplicate = nearbyMosques.find(m =>
-      Math.abs(m.lat - location.lat) < threshold &&
-      Math.abs(m.lng - location.lng) < threshold
-    );
-
-    if (duplicate) {
-      // Update name/address/school on the existing record but leave isApproved unchanged
-      // and mark timings as pending — admin review still required
-      duplicate.name    = name;
-      duplicate.address = address;
-      // Only touch school if the caller actually sent one — a timings-only
-      // follow-up submission has no `school` field and shouldn't silently
-      // reset a previously-set 'hanafi' back to the 'shafi' default.
-      if (school !== undefined) duplicate.school = school === 'hanafi' ? 'hanafi' : 'shafi';
-      if (iqamahTimings) {
-        duplicate.iqamahTimings   = typeof iqamahTimings === 'string' ? JSON.parse(iqamahTimings) : iqamahTimings;
-        duplicate.timingsApproved = false;
-        duplicate.timingsSubmittedBy = {
-          id: req.user.id, name: req.user.name, email: req.user.email, submittedAt: new Date().toISOString(),
-        };
-      }
-      if (photoUrl) {
-        duplicate.photoUrl = photoUrl;
-      }
-      await duplicate.save();
-      return res.status(200).json({
-        message: 'Already added masjid has been updated with the new details and timings.',
-        mosque: duplicate,
+    // Duplicate check — same name within ~100 m (bounded box so it stays fast as
+    // the table grows). Being close is NOT enough on its own: two different
+    // masjids can stand a few metres apart and both must be addable.
+    // `confirmNew` is the submitter saying "I've seen the match below and this is
+    // a different masjid" — it skips the check; the row is still created
+    // unapproved, so an admin makes the final call either way.
+    if (confirmNew !== true) {
+      const threshold = SAME_MOSQUE_DISTANCE_THRESHOLD;
+      const nearbyMosques = await Mosque.findAll({
+        where: {
+          lat: { [Op.between]: [location.lat - threshold, location.lat + threshold] },
+          lng: { [Op.between]: [location.lng - threshold, location.lng + threshold] },
+        },
       });
+      const duplicate = nearbyMosques.find(m => isDuplicateSubmission(m, name));
+
+      if (duplicate) {
+        // Report it, never touch it: a new submission must not rewrite an existing
+        // masjid's name/address/timings/photo — that would let any logged-in user
+        // alter a live, approved masjid with no review. Edits to an existing
+        // masjid go through PUT /:id/timings and PUT /:id/photo instead.
+        return res.status(409).json({
+          message: `"${duplicate.name}" is already added at this location. You can open it to view or update its timings.`,
+          mosque: duplicate,
+        });
+      }
     }
 
     const createdMosque = await Mosque.create({
