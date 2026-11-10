@@ -39,6 +39,15 @@ describe('Mosque routes (/api/mosques)', () => {
     expect(Array.isArray(res.body)).toBe(true);
   });
 
+  test('GET /api/mosques nearby never falls back to far-away mosques', async () => {
+    // Middle of the South Pacific — nothing is near. The route used to answer an
+    // empty area with the 50 newest mosques from anywhere (1000+ km away).
+    const res = await request(app).get('/api/mosques?lat=-48.8767&lng=-123.3933');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    for (const m of res.body) expect(m.distanceMeters).toBeLessThan(60000);
+  });
+
   test('GET /api/mosques rejects an out-of-range latitude', async () => {
     const res = await request(app).get('/api/mosques?lat=999&lng=0');
     expect(res.status).toBe(400);
