@@ -4,9 +4,9 @@ const rateLimit = require('express-rate-limit');
 const Mosque = require('../models/Mosque');
 const { protect } = require('../middleware/auth');
 const { uploadMem } = require('../middleware/upload');
-const { Op } = require('sequelize');
+const { Op, literal } = require('sequelize');
 const axios = require('axios');
-const { cacheGet, cacheSet } = require('../config/redis');
+const { findExternalMosques, distanceMeters, keywordTokens } = require('../utils/externalMosques');
 
 // ── Rate limiter for write operations ─────────────────────────────────────────
 // Auth is already required, but this caps a compromised/malicious account too.
@@ -18,18 +18,6 @@ const writeLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
-
-// ── Google Places cache (Redis) ─────────────────────────────────────────────────
-// Buckets nearby-mosque responses by a coarse grid (~1.1km cells) so repeated
-// requests for the same area don't hit the Google API on every call.
-// TTL: 5 minutes. Falls back to always-miss (no error) if Redis isn't configured
-// or is unreachable — see config/redis.js.
-const GOOGLE_CACHE_TTL_SECONDS = 5 * 60;
-
-function googleCacheKey(lat, lng, keyword) {
-  // Round to 2 decimal places (~1.1 km grid bucket)
-  return `google:${parseFloat(lat).toFixed(2)},${parseFloat(lng).toFixed(2)},${keyword || ''}`;
-}
 
 // ── Same-mosque matching (Google Places ↔ DB) ──────────────────────────────────
 // Most DB mosques are added by hand (map pin + free-text name) and never carry a
@@ -89,141 +77,128 @@ function sanitiseMosqueData(raw) {
 }
 
 // ── GET /api/mosques ───────────────────────────────────────────────────────────
-// Returns DB mosques (approved) merged with Google Places results.
-// Supports: ?lat=&lng= (nearby), ?keyword= (search), ?page=&limit= (pagination)
+// Returns approved DB mosques merged with nearby mosques from Google Places (or
+// OpenStreetMap when Google is unavailable), nearest first.
+// Supports: ?lat=&lng= (nearby), ?keyword= (search), ?limit=, and ?page= (only
+// for the plain list without coordinates).
+const NEARBY_DB_RADIUS_KM = 50;
+const DEFAULT_LIMIT = 60;
+const MAX_KEYWORD_LENGTH = 80;
+
+// Escapes LIKE wildcards so a search for "50%" doesn't match everything.
+const likePattern = (s) => `%${s.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+
+// ORDER BY expression for "nearest first". Plain equirectangular distance —
+// accurate enough for ranking within a city and cheap for MySQL. Only ever
+// called with numbers that already passed parseFloat + range validation.
+const distanceOrder = (lat, lng) => {
+  const cosLat = Math.cos(lat * Math.PI / 180);
+  return literal(`(POW(lat - (${Number(lat)}), 2) + POW((lng - (${Number(lng)})) * ${cosLat}, 2))`);
+};
+
+// Folds each external result that is the same physical mosque as a DB row INTO
+// that row's card, and returns the external results that had no DB twin.
+async function mergeExternalIntoDb(dbMosques, external) {
+  const consumedIds = new Set();
+  const backfills = [];
+
+  for (const m of dbMosques) {
+    const linkedId = m.googlePlaceId;
+    const linkedSource = !linkedId ? null : linkedId.startsWith('osm-') ? 'osm' : 'google';
+    let match = linkedId ? external.mosques.find((e) => e.id === linkedId) : null;
+
+    // A link to a place from THIS source is authoritative — never fuzzy-match an
+    // already-linked mosque to a *different* nearby place. A link to the other
+    // source (e.g. OSM id while Google is answering) can't be compared by id,
+    // so fall back to proximity + name.
+    if (!match && linkedSource !== external.source) {
+      match = external.mosques.find((e) => !consumedIds.has(e.id) && isSameMosque(m, e));
+      // Backfill only Google ids so future requests match instantly by id. OSM
+      // matches are not stored: that would block linking to Google later.
+      if (match && !linkedId && match.source === 'google') {
+        m.googlePlaceId = match.id;
+        backfills.push(
+          Mosque.update({ googlePlaceId: match.id }, { where: { id: m.id } })
+            .catch((err) => console.error('Failed to backfill googlePlaceId link:', err.message))
+        );
+      }
+    }
+
+    if (match) {
+      consumedIds.add(match.id);
+      m.rating = match.rating || m.rating || 0;
+      if (!m.photoUrl) m.photoUrl = match.photoUrl;
+      m.isGoogle = false; // Backed by a real DB row — edits always target it directly
+    }
+  }
+
+  await Promise.all(backfills);
+  const linkedIds = new Set(dbMosques.map((m) => m.googlePlaceId).filter(Boolean));
+  return external.mosques.filter((e) => !consumedIds.has(e.id) && !linkedIds.has(e.id));
+}
+
 router.get('/', async (req, res) => {
   try {
-    const { lat, lng, keyword } = req.query;
-    const page  = Math.max(1, parseInt(req.query.page)  || 1);
-    const limit = Math.min(100, parseInt(req.query.limit) || 50);
-    const offset = (page - 1) * limit;
-
-    const where = { isApproved: true };
+    const { lat, lng } = req.query;
+    const keyword = String(req.query.keyword || '').trim().replace(/\s+/g, ' ').slice(0, MAX_KEYWORD_LENGTH);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || DEFAULT_LIMIT));
+    const page = Math.max(1, parseInt(req.query.page) || 1);
 
     // Validate coordinates
-    let latNum, lngNum;
+    let latNum = null, lngNum = null;
     if (lat || lng) {
       latNum = parseFloat(lat);
       lngNum = parseFloat(lng);
       if (isNaN(latNum) || isNaN(lngNum) || latNum < -90 || latNum > 90 || lngNum < -180 || lngNum > 180) {
         return res.status(400).json({ message: 'Invalid latitude or longitude' });
       }
-      // Apply bounding box only when no keyword search is active
-      if (!keyword) {
-        const RADIUS_KM = 50; // Expanded to 50 km radius for better coverage
-        const latDelta = RADIUS_KM / 111;
-        const lngDelta = RADIUS_KM / (111 * Math.cos(latNum * Math.PI / 180));
-        where.lat = { [Op.between]: [latNum - latDelta, latNum + latDelta] };
-        where.lng = { [Op.between]: [lngNum - lngDelta, lngNum + lngDelta] };
-      }
     }
+    const hasLocation = latNum !== null;
 
-    // Keyword filter — applied in DB for name/address fields
+    const where = { isApproved: true };
     if (keyword) {
-      const cleanKeyword = keyword.trim();
-      where[Op.or] = [
-        { name: { [Op.like]: `%${cleanKeyword}%` } },
-        { address: { [Op.like]: `%${cleanKeyword}%` } },
-      ];
+      // Every specific word must appear in the name or address, so
+      // "Masjid-e-Noor" finds "Noor Masjid" and vice versa.
+      where[Op.and] = keywordTokens(keyword).map((token) => ({
+        [Op.or]: [
+          { name: { [Op.like]: likePattern(token) } },
+          { address: { [Op.like]: likePattern(token) } },
+        ],
+      }));
+    } else if (hasLocation) {
+      // Nearby list: only mosques around the user. A name search stays global
+      // (sorted nearest first) so a masjid in another city can still be found.
+      const latDelta = NEARBY_DB_RADIUS_KM / 111;
+      const lngDelta = NEARBY_DB_RADIUS_KM / (111 * Math.max(0.01, Math.cos(latNum * Math.PI / 180)));
+      where.lat = { [Op.between]: [latNum - latDelta, latNum + latDelta] };
+      where.lng = { [Op.between]: [lngNum - lngDelta, lngNum + lngDelta] };
     }
 
-    let { count, rows } = await Mosque.findAndCountAll({ where, limit, offset, order: [['createdAt', 'DESC']] });
+    // No "show every mosque" fallback when nothing is nearby: that used to send
+    // mosques from 1000 km away as the user's "nearby" list.
+    const dbQuery = Mosque.findAll({
+      where,
+      limit,
+      offset: hasLocation ? 0 : (page - 1) * limit,
+      order: hasLocation ? [[distanceOrder(latNum, lngNum), 'ASC']] : [['createdAt', 'DESC']],
+    });
+    // DB and external lookups are independent — run them together.
+    const [rows, external] = await Promise.all([
+      dbQuery,
+      hasLocation ? findExternalMosques(latNum, lngNum, keyword) : { source: null, mosques: [] },
+    ]);
 
-    // Fallback: If bounding box returned 0 mosques and no keyword was specified, return all approved mosques
-    if (rows.length === 0 && !keyword) {
-      delete where.lat;
-      delete where.lng;
-      const fallbackResult = await Mosque.findAndCountAll({ where: { isApproved: true }, limit, offset, order: [['createdAt', 'DESC']] });
-      rows = fallbackResult.rows;
+    let mosques = rows.map((m) => m.toJSON());
+    if (external.mosques.length) {
+      mosques = [...mosques, ...(await mergeExternalIntoDb(mosques, external))];
     }
 
-    let mosques = rows.map(m => m.toJSON());
-
-    // ── Merge Google Places results ────────────────────────────────────────────
-    if (latNum != null && lngNum != null && process.env.GOOGLE_MAPS_API_KEY) {
-      const cacheKey = googleCacheKey(latNum, lngNum, keyword);
-      let googleMosques = await cacheGet(cacheKey);
-
-      if (!googleMosques) {
-        try {
-          const searchKeyword = keyword ? `${keyword} masjid` : 'masjid';
-          const googleRes = await axios.get(
-            `https://maps.googleapis.com/maps/api/place/nearbysearch/json`,
-            {
-              params: {
-                location: `${latNum},${lngNum}`,
-                radius: 20000,
-                type: 'mosque',
-                keyword: searchKeyword,
-                key: process.env.GOOGLE_MAPS_API_KEY,
-              },
-              timeout: 5000,
-            }
-          );
-
-          if (googleRes.data?.status && googleRes.data.status !== 'OK' && googleRes.data.status !== 'ZERO_RESULTS') {
-            console.error('Google Places API Status:', googleRes.data.status, googleRes.data.error_message || '');
-          }
-
-          googleMosques = (googleRes.data?.results || []).map(place => ({
-            id: place.place_id,
-            name: place.name,
-            address: place.vicinity,
-            lat: place.geometry.location.lat,
-            lng: place.geometry.location.lng,
-            rating: place.rating || 0,
-            // SECURITY: photo reference is proxied through our own endpoint —
-            // the Google API key is NEVER sent to the client.
-            photoUrl: place.photos?.length
-              ? `/api/mosques/proxy-photo?ref=${encodeURIComponent(place.photos[0].photo_reference)}`
-              : null,
-            isGoogle: true,
-          }));
-
-          await cacheSet(cacheKey, googleMosques, GOOGLE_CACHE_TTL_SECONDS);
-        } catch (err) {
-
-          console.error('Google API Request Failed:', err.message);
-          googleMosques = [];
-        }
-      }
-
-      // ── Merge, don't duplicate: fold each Google result that matches a DB
-      // mosque INTO that DB mosque's card (keeping the DB row as the single
-      // source of truth for edits), and backfill the link so future requests
-      // match instantly by googlePlaceId without needing the name/proximity
-      // fallback again.
-      const consumedGoogleIds = new Set();
+    if (hasLocation) {
       for (const m of mosques) {
-        let g = null;
-        if (m.googlePlaceId) {
-          // Already linked to a specific Google place — that link is authoritative.
-          // Only enrich from THAT exact place if it happens to be in this
-          // response; never fuzzy-match an already-linked mosque to a
-          // *different* nearby place just because its own didn't show up here.
-          g = googleMosques.find(gm => gm.id === m.googlePlaceId);
-        } else {
-          g = googleMosques.find(gm => !consumedGoogleIds.has(gm.id) && isSameMosque(m, gm));
-          if (g) {
-            try {
-              await Mosque.update({ googlePlaceId: g.id }, { where: { id: m.id } });
-              m.googlePlaceId = g.id;
-            } catch (err) {
-              console.error('Failed to backfill googlePlaceId link:', err.message);
-            }
-          }
-        }
-        if (g) {
-          consumedGoogleIds.add(g.id);
-          m.rating = g.rating || m.rating || 0;
-          if (!m.photoUrl) m.photoUrl = g.photoUrl;
-          m.isGoogle = false; // Backed by a real DB row — edits always target it directly
-        }
+        m.distanceMeters = Math.round(distanceMeters(latNum, lngNum, Number(m.lat), Number(m.lng)));
       }
-
-      // Remaining Google results have no DB counterpart yet — list them as-is
-      const uniqueGoogle = googleMosques.filter(g => !consumedGoogleIds.has(g.id) && !mosques.some(m => m.googlePlaceId === g.id));
-      mosques = [...mosques, ...uniqueGoogle];
+      mosques.sort((a, b) => a.distanceMeters - b.distanceMeters);
+      mosques = mosques.slice(0, limit);
     }
 
     res.json(mosques);
